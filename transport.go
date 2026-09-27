@@ -79,6 +79,8 @@ type call struct {
 	body           any
 	text           bool
 	idempotencyKey string
+	// noIdempotencyKey: the endpoint does not honour Idempotency-Key, so none is sent.
+	noIdempotencyKey bool
 }
 
 type rawResponse struct {
@@ -97,6 +99,7 @@ type transport struct {
 	timeout    time.Duration
 	maxRetries int
 	sleep      func(context.Context, time.Duration) error
+	now        func() time.Time
 	random     func() float64
 	onRetry    func(RetryInfo)
 }
@@ -119,7 +122,7 @@ func (t *transport) options(opts []CallOption) callOptions {
 func (t *transport) request(ctx context.Context, c call, opts []CallOption) (*rawResponse, error) {
 	o := t.options(opts)
 	info := operations[c.op]
-	if info.Method != http.MethodGet && c.idempotencyKey == "" {
+	if info.Method != http.MethodGet && c.idempotencyKey == "" && !c.noIdempotencyKey {
 		c.idempotencyKey = o.idempotencyKey
 		if c.idempotencyKey == "" {
 			c.idempotencyKey = newID()

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"time"
 )
 
 // ---------------------------------------------------------------------------------------
@@ -436,21 +437,203 @@ func (s *TradingService) CancelOrder(ctx context.Context, orderID string, opts .
 	}
 }
 
-// CancelAll cancels every open order in one market, such as "BTC/USDT". An empty symbol is
-// an error, so an account-wide cancel never happens by accident; use CancelAllMarkets for that.
+// CancelAll cancels every open order in one market, such as "BTC/USDT", in one request. An
+// empty symbol is an error, so an account-wide cancel never happens by accident; use
+// CancelAllMarkets for that. An unknown symbol is an APIError matching ErrNotFound.
 //
-// The server limits cancel-all to 30 calls a minute per account. It is naturally repeatable,
-// so it is retried after connection errors; a retry reports only what that retry cancelled.
+// One call handles at most 500 orders. Every order it handled is in exactly one of Cancelled,
+// AlreadyClosed (it closed on its own first: not a failure) and Failed (with the reason in
+// Failures; INVALID_STATE means it was still being placed). HasMore means there are more:
+// call again, or use CancelAllUntilDone.
+//
+// The server limits cancel-all to 30 calls a minute per account (ErrRateLimited, retried after
+// the server's wait by the normal retry policy). It is naturally repeatable, so it is retried
+// after connection errors; a retry reports only what that retry did. No Idempotency-Key is
+// sent: the server does not honour one here.
 func (s *TradingService) CancelAll(ctx context.Context, symbol string, opts ...CallOption) (CancelAllResult, error) {
 	if symbol == "" {
 		return CancelAllResult{}, &ConfigError{Msg: `Trading.CancelAll: symbol is required ("BASE/QUOTE"); use CancelAllMarkets to cancel in every market`}
 	}
-	return getData[CancelAllResult](ctx, s.t, call{op: OpCancelAll, body: CancelAllRequest{Symbol: &symbol}}, opts)
+	return s.cancelAllOnce(ctx, &symbol, opts)
 }
 
-// CancelAllMarkets cancels every open order in EVERY market.
+// CancelAllMarkets cancels every open order in EVERY market, in one request. See CancelAll.
 func (s *TradingService) CancelAllMarkets(ctx context.Context, opts ...CallOption) (CancelAllResult, error) {
-	return getData[CancelAllResult](ctx, s.t, call{op: OpCancelAll, body: CancelAllRequest{}}, opts)
+	return s.cancelAllOnce(ctx, nil, opts)
+}
+
+func (s *TradingService) cancelAllOnce(ctx context.Context, symbol *string, opts []CallOption) (CancelAllResult, error) {
+	res, err := getData[CancelAllResult](ctx, s.t, call{op: OpCancelAll, body: CancelAllRequest{Symbol: symbol},
+		noIdempotencyKey: true}, opts)
+	if err != nil {
+		return res, err
+	}
+	// Older servers omit the v2 fields; keep the slices non-nil either way.
+	if res.Cancelled == nil {
+		res.Cancelled = []string{}
+	}
+	if res.AlreadyClosed == nil {
+		res.AlreadyClosed = []string{}
+	}
+	if res.Failed == nil {
+		res.Failed = []string{}
+	}
+	if res.Failures == nil {
+		res.Failures = []CancelFailure{}
+	}
+	return res, nil
+}
+
+// CancelAllOptions selects the target of CancelAllUntilDone and bounds its loop. Exactly one of
+// Symbol and AllMarkets must be set, so an account-wide cancel is always explicit.
+type CancelAllOptions struct {
+	Symbol     string        // one market, such as "BTC/USDT"
+	AllMarkets bool          // every market
+	MaxRounds  int           // calls at most; default 20
+	TimeBudget time.Duration // stop before a back-off would reach this; default 120 s
+}
+
+// Reasons CancelAllUntilDone stopped.
+const (
+	CancelStoppedDone       = "done"
+	CancelStoppedMaxRounds  = "max_rounds"
+	CancelStoppedTimeBudget = "time_budget"
+)
+
+// CancelAllSummary merges the rounds of CancelAllUntilDone by order id; an order's latest state
+// wins (an order that failed in one round and was cancelled in a later one is only in Cancelled).
+type CancelAllSummary struct {
+	Cancelled     []string
+	AlreadyClosed []string
+	Failed        []string        // still failed after the last round
+	Failures      []CancelFailure // the latest reason for each order in Failed
+	HasMore       bool            // the last round's has_more
+	Rounds        int
+	Stopped       string // CancelStoppedDone, CancelStoppedMaxRounds or CancelStoppedTimeBudget
+}
+
+var cancelBackoff = []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 15 * time.Second}
+
+// CancelAllUntilDone repeats cancel-all until nothing is left to do: while HasMore is set, or
+// while an order failed with INVALID_STATE (still being placed) or SERVICE_UNAVAILABLE. After a
+// round with no progress (nothing cancelled or already closed) it waits 1, 2, 4, 8, then 15 s
+// before the next call; any progress resets the wait. It stops after MaxRounds calls, or when
+// the next wait would reach TimeBudget; the server closes an order stuck being placed within
+// about 90 s. Other failure codes are returned in the summary, never retried by the loop.
+//
+// On an error it returns the summary so far with the error. ctx cancels the waits.
+func (s *TradingService) CancelAllUntilDone(ctx context.Context, o CancelAllOptions, opts ...CallOption) (CancelAllSummary, error) {
+	var symbol *string
+	switch {
+	case o.Symbol != "" && o.AllMarkets:
+		return CancelAllSummary{}, &ConfigError{Msg: "Trading.CancelAllUntilDone: set Symbol or AllMarkets, not both"}
+	case o.Symbol != "":
+		sym := o.Symbol
+		symbol = &sym
+	case !o.AllMarkets:
+		return CancelAllSummary{}, &ConfigError{Msg: `Trading.CancelAllUntilDone: set Symbol ("BASE/QUOTE") or AllMarkets: true`}
+	}
+	maxRounds := o.MaxRounds
+	if maxRounds <= 0 {
+		maxRounds = 20
+	}
+	budget := o.TimeBudget
+	if budget <= 0 {
+		budget = 120 * time.Second
+	}
+
+	m := newCancelMerge()
+	start := s.t.now()
+	wait := 0
+	for round := 1; ; round++ {
+		res, err := s.cancelAllOnce(ctx, symbol, opts)
+		if err != nil {
+			return m.summary(round-1, "", false), err
+		}
+		m.add(res)
+		retry := false
+		for _, f := range res.Failures {
+			if f.Code == string(CodeInvalidState) || f.Code == string(CodeServiceUnavailable) {
+				retry = true
+			}
+		}
+		if !res.HasMore && !retry {
+			return m.summary(round, CancelStoppedDone, res.HasMore), nil
+		}
+		if round >= maxRounds {
+			return m.summary(round, CancelStoppedMaxRounds, res.HasMore), nil
+		}
+		if len(res.Cancelled)+len(res.AlreadyClosed) > 0 {
+			wait = 0
+			if s.t.now().Sub(start) >= budget {
+				return m.summary(round, CancelStoppedTimeBudget, res.HasMore), nil
+			}
+			continue
+		}
+		d := cancelBackoff[min(wait, len(cancelBackoff)-1)]
+		wait++
+		if s.t.now().Sub(start)+d >= budget {
+			return m.summary(round, CancelStoppedTimeBudget, res.HasMore), nil
+		}
+		if err := s.t.sleep(ctx, d); err != nil {
+			return m.summary(round, "", res.HasMore), err
+		}
+	}
+}
+
+type cancelMerge struct {
+	order    []string
+	state    map[string]string
+	failures map[string]CancelFailure
+}
+
+func newCancelMerge() *cancelMerge {
+	return &cancelMerge{state: map[string]string{}, failures: map[string]CancelFailure{}}
+}
+
+func (m *cancelMerge) set(id, st string) {
+	if _, seen := m.state[id]; !seen {
+		m.order = append(m.order, id)
+	}
+	m.state[id] = st
+}
+
+func (m *cancelMerge) add(r CancelAllResult) {
+	for _, id := range r.Cancelled {
+		m.set(id, "cancelled")
+	}
+	for _, id := range r.AlreadyClosed {
+		m.set(id, "already_closed")
+	}
+	reasons := map[string]CancelFailure{}
+	for _, f := range r.Failures {
+		reasons[f.OrderID] = f
+	}
+	for _, id := range r.Failed {
+		m.set(id, "failed")
+		if f, ok := reasons[id]; ok {
+			m.failures[id] = f
+		} else {
+			m.failures[id] = CancelFailure{OrderID: id}
+		}
+	}
+}
+
+func (m *cancelMerge) summary(rounds int, stopped string, hasMore bool) CancelAllSummary {
+	out := CancelAllSummary{Cancelled: []string{}, AlreadyClosed: []string{}, Failed: []string{},
+		Failures: []CancelFailure{}, HasMore: hasMore, Rounds: rounds, Stopped: stopped}
+	for _, id := range m.order {
+		switch m.state[id] {
+		case "cancelled":
+			out.Cancelled = append(out.Cancelled, id)
+		case "already_closed":
+			out.AlreadyClosed = append(out.AlreadyClosed, id)
+		default:
+			out.Failed = append(out.Failed, id)
+			out.Failures = append(out.Failures, m.failures[id])
+		}
+	}
+	return out
 }
 
 // derefOr copies *p, or returns the zero value for nil.

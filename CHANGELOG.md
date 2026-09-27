@@ -6,6 +6,24 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-dev.2]
+
+Cancel-all v2 (the API change of 2026-09-27).
+
+### Added
+- `CancelAllResult` has `AlreadyClosed` (orders that closed on their own first: not failures),
+  `Failures` (`CancelFailure`: order id, code, message) and `HasMore` (more than the 500 orders one
+  call handles).
+- `Trading.CancelAllUntilDone(ctx, CancelAllOptions{Symbol | AllMarkets, MaxRounds, TimeBudget})`
+  repeats cancel-all while `HasMore` is set or orders fail with `INVALID_STATE` or
+  `SERVICE_UNAVAILABLE`. It backs off 1-2-4-8-15 s after rounds without progress, is bounded by
+  `MaxRounds` (default 20) and `TimeBudget` (default 120 s), and merges rounds by order id.
+  `CancelAll` and `CancelAllMarkets` stay a single request.
+
+### Changed
+- Cancel-all no longer sends an `Idempotency-Key`; the server does not honour one there.
+- The unknown-symbol 404 (`ErrNotFound`) and the 30-a-minute 429 (`ErrRateLimited`) are documented.
+
 ## [0.1.0-dev.1]
 
 First pre-release. Built from `openapi.sdk.json` (spec `info.version` 1.0.0).

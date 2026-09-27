@@ -14,7 +14,7 @@ The official Go SDK for the [CEXY.io](https://cexy.io) REST and WebSocket API.
 ## Install
 
 ```bash
-go get github.com/cexyio/cexy-go@v0.1.0-dev.1
+go get github.com/cexyio/cexy-go@v0.1.0-dev.2
 ```
 
 ```go
@@ -65,6 +65,22 @@ _, err = c.Trading.CancelAll(ctx, "BTC/USDT") // CancelAllMarkets(ctx) = every m
 `CancelAll` requires a symbol: the server treats a missing symbol as "every market", so that is a
 separate method, `CancelAllMarkets`. The server allows cancel-all 30 times a minute per account.
 
+One cancel-all call handles at most 500 orders. Each order it handled is in exactly one of
+`Cancelled`, `AlreadyClosed` (it closed on its own first; not an error) and `Failed`, with the
+reason in `Failures` (`INVALID_STATE` means the order was still being placed). `HasMore` means
+there are more. To repeat until nothing is left, use `CancelAllUntilDone`:
+
+```go
+sum, err := c.Trading.CancelAllUntilDone(ctx, cexy.CancelAllOptions{Symbol: "BTC/USDT"}) // or AllMarkets: true
+// sum.Cancelled, sum.AlreadyClosed, sum.Failed + sum.Failures, sum.Rounds, sum.Stopped
+```
+
+It calls again while `HasMore` is set or an order failed with `INVALID_STATE` or
+`SERVICE_UNAVAILABLE`. After a round with no progress it waits 1, 2, 4, 8, then 15 s, and it
+stops after `MaxRounds` calls (default 20) or before a wait would reach `TimeBudget` (default
+120 s). A rate-limit wait counts against the budget. Rounds are merged by order id: the latest
+state wins.
+
 Give both `APIKey` and `APISecret`, or neither: `New` returns a `*ConfigError` for only one.
 
 | Service | Methods | Scope |
@@ -76,7 +92,7 @@ Give both `APIKey` and `APISecret`, or neither: `New` returns a `*ConfigError` f
 | `Exports` | `Deposits`, `Ledger`, `Orders`, `Trades`, `Withdrawals` (CSV text) | read |
 | `Wallet` | `Deposits`, `Deposit`, `Withdrawals`, `Withdrawal`, `WithdrawalAddresses`, `DepositAddress` (+ iterators) | read |
 | `Trading` | `OpenOrders`, `Order`, `OrderByClientID`, `OrderHistory`, `Trades` (+ iterators) | read |
-| `Trading` | `PlaceOrder`, `CancelOrder`, `CancelAll`, `CancelAllMarkets` | trade |
+| `Trading` | `PlaceOrder`, `CancelOrder`, `CancelAll`, `CancelAllMarkets`, `CancelAllUntilDone` | trade |
 | `Pools` | `Join`, `Exit` | trade |
 
 `Wallet.DepositAddress` **creates** the address on the first call for that asset and network (later

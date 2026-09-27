@@ -134,11 +134,29 @@ type CancelAllRequest struct {
 }
 
 // CancelAllResult: What a bulk cancellation achieved.
+//
+// Every order the call handled is in exactly one of `cancelled`, `already_closed` and `failed`.
 type CancelAllResult struct {
+	// Orders that closed on their own (filled, rejected, cancelled elsewhere) before this call reached them. Nothing was done to them, and they are not failures.
+	AlreadyClosed []string `json:"already_closed"`
 	// Orders cancelled.
 	Cancelled []string `json:"cancelled"`
-	// Orders that could not be cancelled. Each failure is logged server-side.
+	// Orders that could not be cancelled in this call. Check `failures` for why, then refresh or call again.
 	Failed []string `json:"failed"`
+	// Why each order in `failed` could not be cancelled.
+	Failures []CancelFailure `json:"failures"`
+	// More open orders exist than one call handles (500). Call again.
+	HasMore bool `json:"has_more"`
+}
+
+// CancelFailure: Why one order could not be cancelled.
+type CancelFailure struct {
+	// The error code of the attempt, as in any error response: e.g. `INVALID_STATE` for an order still being placed when the wait ran out, or `MARKET_UNAVAILABLE`.
+	Code string `json:"code"`
+	// Its message.
+	Message string `json:"message"`
+	// The order.
+	OrderID string `json:"order_id"`
 }
 
 // CandleInterval: Candle/kline intervals for market data.

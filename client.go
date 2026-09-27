@@ -175,7 +175,7 @@ func New(opts Options) (*Client, error) {
 	}
 
 	t := &transport{baseURL: base, origin: origin(u), http: hc, auth: auth, limiter: limiter, userAgent: ua, timeout: timeout,
-		maxRetries: maxRetries, sleep: sleep, random: random, onRetry: opts.OnRetry}
+		maxRetries: maxRetries, sleep: sleep, now: now, random: random, onRetry: opts.OnRetry}
 	return &Client{
 		Markets:       &MarketsService{t},
 		Assets:        &AssetsService{t},
