@@ -164,15 +164,14 @@ func errorFromResponse(status int, body []byte, h http.Header, redact func(strin
 		e.Details = decodeDetails(b.Details)
 		e.Fields = b.Fields
 		if redact != nil {
-			// The server may echo request values back; keep credentials out of them too.
-			for k, v := range e.Details {
-				if str, ok := v.(string); ok {
-					e.Details[k] = redact(str)
-				}
-			}
+			// The server may echo request values back, even nested or as object keys; keep
+			// credentials out of all of them.
+			e.Details, _ = redactValue(e.Details, redact).(map[string]any)
+			fields := make(map[string]string, len(e.Fields))
 			for k, v := range e.Fields {
-				e.Fields[k] = redact(v)
+				fields[redact(k)] = redact(v)
 			}
+			e.Fields = fields
 		}
 		if b.RequestID != nil && *b.RequestID != "" {
 			e.RequestID = *b.RequestID
@@ -227,6 +226,28 @@ func redirectError(status int, h http.Header, redact func(string) string) *APIEr
 		Fields: map[string]string{}, RequestID: h.Get("X-Request-Id"), kind: ErrUnexpectedRedirect}
 }
 
+// redactValue redacts every string in a decoded JSON value, map keys included, recursively.
+func redactValue(v any, redact func(string) string) any {
+	switch x := v.(type) {
+	case string:
+		return redact(x)
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			out[redact(k)] = redactValue(val, redact)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, val := range x {
+			out[i] = redactValue(val, redact)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
 func decodeDetails(raw map[string]json.RawMessage) map[string]any {
 	out := make(map[string]any, len(raw))
 	for k, v := range raw {
@@ -249,12 +270,14 @@ func decodeDetails(raw map[string]json.RawMessage) map[string]any {
 }
 
 // retryAfter reads Retry-After (seconds or an HTTP date) and details.retry_after_seconds, and
-// returns the larger.
+// returns the larger. Both are untrusted: unparseable, negative, NaN or infinite values are
+// ignored, and a huge value saturates instead of overflowing (callers never wait longer than
+// MaxServerWait).
 func retryAfter(h http.Header, details map[string]any) time.Duration {
 	var best time.Duration
 	if v := strings.TrimSpace(h.Get("Retry-After")); v != "" {
-		if secs, err := strconv.ParseFloat(v, 64); err == nil && !math.IsNaN(secs) && secs > 0 {
-			best = time.Duration(secs * float64(time.Second))
+		if secs, err := strconv.ParseFloat(v, 64); err == nil {
+			best = secondsDuration(secs)
 		} else if at, err := http.ParseTime(v); err == nil {
 			if d := time.Until(at); d > 0 {
 				best = d
@@ -283,8 +306,17 @@ func detailSeconds(v any) time.Duration {
 	default:
 		return 0
 	}
-	if secs <= 0 || math.IsNaN(secs) || math.IsInf(secs, 0) {
+	return secondsDuration(secs)
+}
+
+// secondsDuration converts untrusted seconds to a Duration: 0 for NaN, infinite, zero or
+// negative input, and saturating at the largest Duration instead of overflowing.
+func secondsDuration(secs float64) time.Duration {
+	if math.IsNaN(secs) || math.IsInf(secs, 0) || secs <= 0 {
 		return 0
+	}
+	if secs >= float64(math.MaxInt64)/float64(time.Second) {
+		return time.Duration(math.MaxInt64)
 	}
 	return time.Duration(secs * float64(time.Second))
 }

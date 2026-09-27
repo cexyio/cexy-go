@@ -3,6 +3,7 @@ package cexy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"path/filepath"
 	"slices"
@@ -25,7 +26,18 @@ type cancelAllCase struct {
 		AlreadyClosed []string          `json:"already_closed"`
 		Failed        []string          `json:"failed"`
 		FailureCodes  map[string]string `json:"failure_codes"`
+		LastErrorCode string            `json:"last_error_code"`
+		ErrorCode     string            `json:"error_code"`
+		Partial       []string          `json:"partial_cancelled"`
 	} `json:"expect"`
+}
+
+// cancelAllItem is one scripted response: a `data` object, or an error response when
+// http_status is set.
+type cancelAllItem struct {
+	HTTPStatus int               `json:"http_status"`
+	Headers    map[string]string `json:"headers"`
+	Error      json.RawMessage   `json:"error"`
 }
 
 // sequence answers cancel-all with the given data objects in order (repeating the last one when
@@ -42,7 +54,17 @@ func sequence(t *testing.T, responses []json.RawMessage, repeat bool) (http.Hand
 			}
 			i = len(responses) - 1
 		}
+		var item cancelAllItem
+		_ = json.Unmarshal(responses[i], &item)
 		w.Header().Set("Content-Type", "application/json")
+		if item.HTTPStatus != 0 {
+			for k, v := range item.Headers {
+				w.Header().Set(k, v)
+			}
+			w.WriteHeader(item.HTTPStatus)
+			_, _ = w.Write([]byte(`{"error":` + string(item.Error) + `}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"data":` + string(responses[i]) + `}`))
 	}, &n
 }
@@ -70,8 +92,21 @@ func TestCancelAllUntilDoneConformance(t *testing.T) {
 			o := CancelAllOptions{Symbol: "BTC/USDT", MaxRounds: tc.Options["max_rounds"],
 				TimeBudget: time.Duration(tc.Options["time_budget_s"]) * time.Second}
 			got, err := c.Trading.CancelAllUntilDone(context.Background(), o)
+			if tc.Expect.ErrorCode != "" {
+				var ae *APIError
+				if !errors.As(err, &ae) || string(ae.Code) != tc.Expect.ErrorCode {
+					t.Fatalf("err %v, want %s", err, tc.Expect.ErrorCode)
+				}
+				if int(calls.Load()) != tc.Expect.Calls || !sameSet(got.Cancelled, tc.Expect.Partial) {
+					t.Fatalf("calls %d, partial %+v", calls.Load(), got)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
+			}
+			if got.LastErrorCode != tc.Expect.LastErrorCode {
+				t.Fatalf("last error code %q, want %q", got.LastErrorCode, tc.Expect.LastErrorCode)
 			}
 			if int(calls.Load()) != tc.Expect.Calls || got.Rounds != tc.Expect.Calls {
 				t.Fatalf("calls %d, rounds %d, want %d", calls.Load(), got.Rounds, tc.Expect.Calls)
@@ -198,7 +233,7 @@ func TestCancelAllUntilDone429WaitCountsAgainstTheBudget(t *testing.T) {
 	if got.Stopped != CancelStoppedTimeBudget || total >= 120*time.Second || total < 110*time.Second {
 		t.Fatalf("stopped %q after %v of sleeps (%v)", got.Stopped, total, fs.all())
 	}
-	if !slices.Contains(fs.all(), 110*time.Second+125*time.Millisecond) {
+	if !slices.Contains(fs.all(), 110*time.Second) { // the loop waits Retry-After exactly
 		t.Fatalf("429 wait not honoured: %v", fs.all())
 	}
 }
@@ -234,5 +269,39 @@ func TestCancelAllUntilDoneStopsWhenContextEnds(t *testing.T) {
 	got, err := c.Trading.CancelAllUntilDone(ctx, CancelAllOptions{Symbol: "BTC/USDT"})
 	if err == nil {
 		t.Fatalf("no error, summary %+v", got)
+	}
+}
+
+// QA M2: every round is one HTTP request, even when every round fails with a retryable 503.
+func TestCancelAllUntilDoneRoundsAreSingleRequests(t *testing.T) {
+	var n atomic.Int32
+	c, _, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret, DisableRateLimit: true},
+		func(w http.ResponseWriter, r *http.Request) {
+			n.Add(1)
+			writeJSON(w, 503, apiErr("SERVICE_UNAVAILABLE", "busy", true))
+		})
+	got, err := c.Trading.CancelAllUntilDone(context.Background(), CancelAllOptions{Symbol: "BTC/USDT",
+		MaxRounds: 20, TimeBudget: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.Load() != 20 || got.Rounds != 20 || got.Stopped != CancelStoppedMaxRounds || got.LastErrorCode != "SERVICE_UNAVAILABLE" {
+		t.Fatalf("requests %d, summary %+v", n.Load(), got)
+	}
+}
+
+// QA M2: a 429 asking for more than the remaining budget stops the loop without sleeping past it.
+func TestCancelAllUntilDoneRefusesAWaitPastTheBudget(t *testing.T) {
+	c, _, fs := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret, DisableRateLimit: true},
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Retry-After", "300")
+			writeJSON(w, 429, apiErr("RATE_LIMITED", "slow down", true))
+		})
+	got, err := c.Trading.CancelAllUntilDone(context.Background(), CancelAllOptions{AllMarkets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Stopped != CancelStoppedTimeBudget || got.Rounds != 1 || len(fs.all()) != 0 {
+		t.Fatalf("summary %+v, sleeps %v", got, fs.all())
 	}
 }

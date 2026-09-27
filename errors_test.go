@@ -2,10 +2,13 @@ package cexy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -214,5 +217,36 @@ func TestOnRetryHook(t *testing.T) {
 	}
 	if len(infos) != 1 || infos[0].Operation != OpListMarkets || infos[0].Attempt != 1 || infos[0].Delay < time.Second {
 		t.Fatalf("%+v", infos)
+	}
+}
+
+// QA: credentials echoed back by the server are redacted everywhere in Details and Fields,
+// nested values and object keys included.
+func TestErrorDetailsAreRedactedRecursively(t *testing.T) {
+	c, _, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret, MaxRetries: 0},
+		func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, 400, map[string]any{"error": map[string]any{
+				"code": "VALIDATION_FAILED", "message": "bad " + testSecret, "retryable": false,
+				"details": map[string]any{
+					"nested": map[string]any{"echo": "x" + testSecret, testSecret: 1},
+					"list":   []any{testKey, map[string]any{"deep": testSecret}},
+					testKey:  "key as a key",
+				},
+				"fields": map[string]any{testSecret: "value " + testKey},
+			}})
+		})
+	_, err := c.Account.Balances(context.Background())
+	var ae *APIError
+	if !errors.As(err, &ae) {
+		t.Fatalf("err %v", err)
+	}
+	dump, _ := json.Marshal(map[string]any{"details": ae.Details, "fields": ae.Fields, "message": ae.Message})
+	for _, s := range []string{testSecret, testKey} {
+		if strings.Contains(string(dump), s) || strings.Contains(fmt.Sprintf("%+v %v", ae, ae), s) {
+			t.Fatalf("%q leaked: %s", s, dump)
+		}
+	}
+	if ae.Details["nested"].(map[string]any)["echo"] == nil {
+		t.Fatalf("structure lost: %s", dump)
 	}
 }

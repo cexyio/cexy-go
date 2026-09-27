@@ -71,7 +71,8 @@ func (l *rateLimiter) update(h http.Header) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.refill()
-	if limit, ok := headerNum(h, "X-RateLimit-Limit"); ok && limit > 0 && limit < l.rpm {
+	// A limit below 1 a minute is not plausible; ignoring it keeps every token wait under a minute.
+	if limit, ok := headerNum(h, "X-RateLimit-Limit"); ok && limit >= 1 && limit < l.rpm {
 		l.rpm = limit
 		l.tokens = math.Min(l.tokens, limit)
 	}
@@ -91,7 +92,7 @@ func (l *rateLimiter) update(h http.Header) {
 	}
 }
 
-// blockFor blocks every request for d (a 429's Retry-After).
+// blockFor blocks every request for d (a 429's Retry-After), at most MaxServerWait.
 func (l *rateLimiter) blockFor(d time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -102,6 +103,7 @@ func (l *rateLimiter) blockLocked(d time.Duration) {
 	if d <= 0 {
 		return
 	}
+	d = min(d, MaxServerWait) // server hints are untrusted
 	if until := l.now().Add(d); until.After(l.blockedUntil) {
 		l.blockedUntil = until
 	}
@@ -116,18 +118,21 @@ func (l *rateLimiter) refill() {
 }
 
 // resetDuration: X-RateLimit-Reset is seconds until the window resets. Values that can only
-// be epoch timestamps (seconds or milliseconds) are tolerated.
+// be epoch timestamps (seconds or milliseconds) are tolerated. The result is at most
+// MaxServerWait; absurd values never overflow.
 func resetDuration(reset float64, now time.Time) time.Duration {
 	var d time.Duration
 	switch {
+	case reset > 1e15:
+		return MaxServerWait
 	case reset > 1e12:
 		d = time.UnixMilli(int64(reset)).Sub(now)
 	case reset > 1e9:
 		d = time.Unix(int64(reset), 0).Sub(now)
 	default:
-		d = time.Duration(reset * float64(time.Second))
+		d = secondsDuration(reset)
 	}
-	return max(d, 0)
+	return min(max(d, 0), MaxServerWait)
 }
 
 func headerNum(h http.Header, name string) (float64, bool) {

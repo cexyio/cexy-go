@@ -21,6 +21,12 @@ const (
 	maxResponseBody = 64 << 20
 )
 
+// MaxServerWait is the longest the SDK waits because of a server hint (Retry-After,
+// details.retry_after_seconds, X-RateLimit-Reset). A longer hint is not waited: the call fails
+// at once with the rate-limit error, whose RetryAfter still holds the server's value, and the
+// client-side rate limiter blocks for at most this long.
+const MaxServerWait = 120 * time.Second
+
 // CallOption changes one call: WithTimeout, WithMaxRetries, WithIdempotencyKey.
 type CallOption func(*callOptions)
 
@@ -36,10 +42,10 @@ func WithTimeout(d time.Duration) CallOption { return func(o *callOptions) { o.t
 // WithMaxRetries overrides the client's MaxRetries for this call (0 disables retries).
 func WithMaxRetries(n int) CallOption { return func(o *callOptions) { o.maxRetries = n } }
 
-// WithIdempotencyKey sets the Idempotency-Key of a mutation (generated when absent). The
-// server honours it on pool join and exit; set it yourself to make a retry across process
-// restarts safe there. Orders and cancels do NOT honour it: their safety comes from
-// client_order_id (see Trading.PlaceOrder).
+// WithIdempotencyKey sets the Idempotency-Key of a pool join or exit (generated when absent),
+// the only endpoints that honour it; set it yourself to make a retry across process restarts
+// safe there. It is ignored on every other call: no Idempotency-Key is sent on orders or
+// cancels, whose safety comes from client_order_id (see Trading.PlaceOrder).
 func WithIdempotencyKey(key string) CallOption {
 	return func(o *callOptions) { o.idempotencyKey = key }
 }
@@ -79,8 +85,9 @@ type call struct {
 	body           any
 	text           bool
 	idempotencyKey string
-	// noIdempotencyKey: the endpoint does not honour Idempotency-Key, so none is sent.
-	noIdempotencyKey bool
+	// idempotent: the endpoint honours Idempotency-Key (pool join and exit), so one is sent and
+	// reused on every retry. No other call sends one.
+	idempotent bool
 }
 
 type rawResponse struct {
@@ -116,13 +123,12 @@ func (t *transport) options(opts []CallOption) callOptions {
 }
 
 // request sends c with the standard retry policy: retryable errors and connection failures
-// are retried. A mutation carries an Idempotency-Key reused on every attempt; the server
-// honours it on pool join and exit, which makes their retries safe, and cancel-all is
-// naturally repeatable. PlaceOrder and CancelOrder use attempt with their own policies.
+// are retried, except when the server asks to wait longer than MaxServerWait. Pool join and
+// exit carry an Idempotency-Key reused on every attempt, which the server honours; cancel-all
+// is naturally repeatable. PlaceOrder and CancelOrder use attempt with their own policies.
 func (t *transport) request(ctx context.Context, c call, opts []CallOption) (*rawResponse, error) {
 	o := t.options(opts)
-	info := operations[c.op]
-	if info.Method != http.MethodGet && c.idempotencyKey == "" && !c.noIdempotencyKey {
+	if c.idempotent && c.idempotencyKey == "" {
 		c.idempotencyKey = o.idempotencyKey
 		if c.idempotencyKey == "" {
 			c.idempotencyKey = newID()
@@ -142,8 +148,12 @@ func (t *transport) request(ctx context.Context, c call, opts []CallOption) (*ra
 	}
 }
 
-// backoff waits before retry number attempt+1, honouring server hints.
+// backoff waits before retry number attempt+1, honouring server hints. A server wait above
+// MaxServerWait is not taken: backoff returns cause, which the caller returns as is.
 func (t *transport) backoff(ctx context.Context, op OperationID, attempt int, cause error, idemKey string) error {
+	if serverWaitTooLong(cause) {
+		return cause
+	}
 	d := t.retryDelay(attempt, cause)
 	if t.onRetry != nil {
 		info := operations[op]
@@ -153,8 +163,14 @@ func (t *transport) backoff(ctx context.Context, op OperationID, attempt int, ca
 	return t.sleep(ctx, d)
 }
 
-// retryDelay: the server's hint plus up to 250 ms of jitter, or full-jitter exponential
-// backoff (500 ms doubling, capped at 10 s).
+// serverWaitTooLong: the server asked to wait longer than MaxServerWait.
+func serverWaitTooLong(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && ae.RetryAfter > MaxServerWait
+}
+
+// retryDelay: the server's hint (at most MaxServerWait, checked by backoff) plus up to 250 ms
+// of jitter, or full-jitter exponential backoff (500 ms doubling, capped at 10 s).
 func (t *transport) retryDelay(attempt int, cause error) time.Duration {
 	var ae *APIError
 	if errors.As(cause, &ae) && ae.RetryAfter > 0 {
@@ -211,7 +227,7 @@ func (t *transport) attempt(ctx context.Context, c call, o callOptions) (*rawRes
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if info.Method != http.MethodGet && c.idempotencyKey != "" {
+	if c.idempotent && c.idempotencyKey != "" {
 		req.Header.Set("Idempotency-Key", c.idempotencyKey)
 	}
 	if info.Auth == "api_key" {

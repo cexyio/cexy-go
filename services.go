@@ -109,7 +109,8 @@ func (s *PoolsService) Join(ctx context.Context, symbol string, req JoinPoolRequ
 		amountField{"quote_amount", &req.QuoteAmount}, amountField{"max_ratio_deviation_percent", maxDev}); err != nil {
 		return JoinPoolResult{}, err
 	}
-	return getData[JoinPoolResult](ctx, s.t, call{op: OpJoinPool, pathParams: map[string]string{"symbol": symbol}, body: req}, opts)
+	return getData[JoinPoolResult](ctx, s.t, call{op: OpJoinPool, pathParams: map[string]string{"symbol": symbol}, body: req,
+		idempotent: true}, opts)
 }
 
 // Exit removes liquidity. The Idempotency-Key makes retries safe.
@@ -117,7 +118,8 @@ func (s *PoolsService) Exit(ctx context.Context, symbol string, req ExitPoolRequ
 	if err := checkAmounts("Pools.Exit", amountField{"shares", &req.Shares}); err != nil {
 		return ExitPoolResult{}, err
 	}
-	return getData[ExitPoolResult](ctx, s.t, call{op: OpExitPool, pathParams: map[string]string{"symbol": symbol}, body: req}, opts)
+	return getData[ExitPoolResult](ctx, s.t, call{op: OpExitPool, pathParams: map[string]string{"symbol": symbol}, body: req,
+		idempotent: true}, opts)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -330,8 +332,8 @@ type PlaceOrderResult struct {
 // PlaceOrder places a REAL order (needs the trade scope). Amounts are decimal strings.
 //
 // Retry safety rests on client_order_id (a UUID is generated when absent): it is unique per
-// account, and the server refuses a repeat before any funds move. The server does NOT honour
-// Idempotency-Key on orders. After an ambiguous failure (connection error, timeout or 5xx) the
+// account, and the server refuses a repeat before any funds move. No Idempotency-Key is sent:
+// the server does not honour one on orders. After an ambiguous failure (connection error, timeout or 5xx) the
 // SDK first looks the order up by client_order_id and returns it if it exists (Recovered);
 // only if it does not exist is the order sent again, with the same client_order_id, so a late
 // first attempt makes the resend fail as a duplicate, which the lookup resolves again.
@@ -350,11 +352,7 @@ func (s *TradingService) PlaceOrder(ctx context.Context, order PlaceOrderRequest
 	}
 	order.ClientOrderID = &clientOrderID
 	o := s.t.options(opts)
-	idemKey := o.idempotencyKey
-	if idemKey == "" {
-		idemKey = newID() // sent, but not honoured for orders
-	}
-	c := call{op: OpPlaceOrder, body: order, idempotencyKey: idemKey}
+	c := call{op: OpPlaceOrder, body: order}
 
 	for attempt := 0; ; attempt++ {
 		raw, err := s.t.attempt(ctx, c, o)
@@ -384,7 +382,7 @@ func (s *TradingService) PlaceOrder(ctx context.Context, order PlaceOrderRequest
 			// Definitive refusals that did not execute (such as 429) are resent below.
 			return PlaceOrderResult{}, err
 		}
-		if berr := s.t.backoff(ctx, OpPlaceOrder, attempt, err, idemKey); berr != nil {
+		if berr := s.t.backoff(ctx, OpPlaceOrder, attempt, err, ""); berr != nil {
 			return PlaceOrderResult{}, berr
 		}
 	}
@@ -411,11 +409,7 @@ func (s *TradingService) lookup(ctx context.Context, clientOrderID string, origi
 // (for example, the order was already filled).
 func (s *TradingService) CancelOrder(ctx context.Context, orderID string, opts ...CallOption) (Order, error) {
 	o := s.t.options(opts)
-	idemKey := o.idempotencyKey
-	if idemKey == "" {
-		idemKey = newID() // sent, but not honoured for cancels
-	}
-	c := call{op: OpCancelOrder, pathParams: map[string]string{"order_id": orderID}, idempotencyKey: idemKey}
+	c := call{op: OpCancelOrder, pathParams: map[string]string{"order_id": orderID}}
 	for attempt := 0; ; attempt++ {
 		raw, err := s.t.attempt(ctx, c, o)
 		if err == nil {
@@ -431,7 +425,7 @@ func (s *TradingService) CancelOrder(ctx context.Context, orderID string, opts .
 		if !isRetryable(err) || attempt >= o.maxRetries {
 			return Order{}, err
 		}
-		if berr := s.t.backoff(ctx, OpCancelOrder, attempt, err, idemKey); berr != nil {
+		if berr := s.t.backoff(ctx, OpCancelOrder, attempt, err, ""); berr != nil {
 			return Order{}, berr
 		}
 	}
@@ -463,11 +457,30 @@ func (s *TradingService) CancelAllMarkets(ctx context.Context, opts ...CallOptio
 }
 
 func (s *TradingService) cancelAllOnce(ctx context.Context, symbol *string, opts []CallOption) (CancelAllResult, error) {
-	res, err := getData[CancelAllResult](ctx, s.t, call{op: OpCancelAll, body: CancelAllRequest{Symbol: symbol},
-		noIdempotencyKey: true}, opts)
+	res, err := getData[CancelAllResult](ctx, s.t, call{op: OpCancelAll, body: CancelAllRequest{Symbol: symbol}}, opts)
 	if err != nil {
 		return res, err
 	}
+	return withV2Slices(res), nil
+}
+
+// cancelAllRound is one round of CancelAllUntilDone: exactly one HTTP request, no retries (the
+// loop owns them).
+func (s *TradingService) cancelAllRound(ctx context.Context, symbol *string, o callOptions) (CancelAllResult, error) {
+	o.maxRetries = 0
+	raw, err := s.t.attempt(ctx, call{op: OpCancelAll, body: CancelAllRequest{Symbol: symbol}}, o)
+	if err != nil {
+		return CancelAllResult{}, err
+	}
+	res, err := decodeData[CancelAllResult](OpCancelAll, raw)
+	if err != nil {
+		return res, err
+	}
+	return withV2Slices(res), nil
+}
+
+// withV2Slices keeps the v2 slices non-nil (older servers omit them).
+func withV2Slices(res CancelAllResult) CancelAllResult {
 	// Older servers omit the v2 fields; keep the slices non-nil either way.
 	if res.Cancelled == nil {
 		res.Cancelled = []string{}
@@ -481,7 +494,7 @@ func (s *TradingService) cancelAllOnce(ctx context.Context, symbol *string, opts
 	if res.Failures == nil {
 		res.Failures = []CancelFailure{}
 	}
-	return res, nil
+	return res
 }
 
 // CancelAllOptions selects the target of CancelAllUntilDone and bounds its loop. Exactly one of
@@ -490,7 +503,7 @@ type CancelAllOptions struct {
 	Symbol     string        // one market, such as "BTC/USDT"
 	AllMarkets bool          // every market
 	MaxRounds  int           // calls at most; default 20
-	TimeBudget time.Duration // stop before a back-off would reach this; default 120 s
+	TimeBudget time.Duration // stop before a wait would reach this; default 120 s
 }
 
 // Reasons CancelAllUntilDone stopped.
@@ -507,21 +520,30 @@ type CancelAllSummary struct {
 	AlreadyClosed []string
 	Failed        []string        // still failed after the last round
 	Failures      []CancelFailure // the latest reason for each order in Failed
-	HasMore       bool            // the last round's has_more
-	Rounds        int
-	Stopped       string // CancelStoppedDone, CancelStoppedMaxRounds or CancelStoppedTimeBudget
+	HasMore       bool            // the last successful round's has_more
+	Rounds        int             // HTTP requests sent (one per round)
+	Stopped       string          // CancelStoppedDone, CancelStoppedMaxRounds or CancelStoppedTimeBudget
+	LastErrorCode string          // set when the last round was a retryable error (e.g. RATE_LIMITED)
 }
 
 var cancelBackoff = []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 15 * time.Second}
 
 // CancelAllUntilDone repeats cancel-all until nothing is left to do: while HasMore is set, or
-// while an order failed with INVALID_STATE (still being placed) or SERVICE_UNAVAILABLE. After a
-// round with no progress (nothing cancelled or already closed) it waits 1, 2, 4, 8, then 15 s
-// before the next call; any progress resets the wait. It stops after MaxRounds calls, or when
-// the next wait would reach TimeBudget; the server closes an order stuck being placed within
-// about 90 s. Other failure codes are returned in the summary, never retried by the loop.
+// while an order failed with INVALID_STATE (still being placed) or SERVICE_UNAVAILABLE.
 //
-// On an error it returns the summary so far with the error. ctx cancels the waits.
+// Each round is exactly one HTTP request: the loop owns the retries, so it never sends more
+// than MaxRounds requests. After a round with no progress (nothing cancelled or already closed)
+// it waits 1, 2, 4, 8, then 15 s before the next call; any progress resets the wait. A round
+// that fails with a retryable error counts as a round without progress: after a 429 the loop
+// waits the server's Retry-After exactly (without advancing the back-off), after any other
+// retryable error the next back-off step. It never takes a wait that would bring the elapsed
+// time to or past TimeBudget, or a server wait above MaxServerWait: it stops with
+// CancelStoppedTimeBudget (and LastErrorCode when the last round failed). It also stops after
+// MaxRounds requests. The server closes an order stuck being placed within about 90 s.
+// Failure codes other than INVALID_STATE and SERVICE_UNAVAILABLE are returned in the summary,
+// never retried.
+//
+// A non-retryable error (or a cancelled ctx) is returned with the summary so far.
 func (s *TradingService) CancelAllUntilDone(ctx context.Context, o CancelAllOptions, opts ...CallOption) (CancelAllSummary, error) {
 	var symbol *string
 	switch {
@@ -541,42 +563,65 @@ func (s *TradingService) CancelAllUntilDone(ctx context.Context, o CancelAllOpti
 	if budget <= 0 {
 		budget = 120 * time.Second
 	}
+	co := s.t.options(opts)
 
 	m := newCancelMerge()
 	start := s.t.now()
-	wait := 0
+	step := 0
+	hasMore := false
 	for round := 1; ; round++ {
-		res, err := s.cancelAllOnce(ctx, symbol, opts)
+		res, err := s.cancelAllRound(ctx, symbol, co)
+		lastCode := ""
+		var d time.Duration
 		if err != nil {
-			return m.summary(round-1, "", false), err
-		}
-		m.add(res)
-		retry := false
-		for _, f := range res.Failures {
-			if f.Code == string(CodeInvalidState) || f.Code == string(CodeServiceUnavailable) {
-				retry = true
+			if ctx.Err() != nil || !isRetryable(err) {
+				return m.summary(round, "", hasMore, ""), err
 			}
-		}
-		if !res.HasMore && !retry {
-			return m.summary(round, CancelStoppedDone, res.HasMore), nil
-		}
-		if round >= maxRounds {
-			return m.summary(round, CancelStoppedMaxRounds, res.HasMore), nil
-		}
-		if len(res.Cancelled)+len(res.AlreadyClosed) > 0 {
-			wait = 0
-			if s.t.now().Sub(start) >= budget {
-				return m.summary(round, CancelStoppedTimeBudget, res.HasMore), nil
+			var ae *APIError
+			if errors.As(err, &ae) {
+				lastCode = string(ae.Code)
+			} else {
+				lastCode = "CONNECTION_ERROR"
 			}
-			continue
+			if round >= maxRounds {
+				return m.summary(round, CancelStoppedMaxRounds, hasMore, lastCode), nil
+			}
+			if errors.As(err, &ae) && errors.Is(err, ErrRateLimited) && ae.RetryAfter > 0 {
+				d = ae.RetryAfter // the server's wait, exactly; the back-off does not advance
+			} else {
+				d = cancelBackoff[min(step, len(cancelBackoff)-1)]
+				step++
+			}
+		} else {
+			m.add(res)
+			hasMore = res.HasMore
+			retry := false
+			for _, f := range res.Failures {
+				if f.Code == string(CodeInvalidState) || f.Code == string(CodeServiceUnavailable) {
+					retry = true
+				}
+			}
+			if !res.HasMore && !retry {
+				return m.summary(round, CancelStoppedDone, hasMore, ""), nil
+			}
+			if round >= maxRounds {
+				return m.summary(round, CancelStoppedMaxRounds, hasMore, ""), nil
+			}
+			if len(res.Cancelled)+len(res.AlreadyClosed) > 0 {
+				step = 0
+				if s.t.now().Sub(start) >= budget {
+					return m.summary(round, CancelStoppedTimeBudget, hasMore, ""), nil
+				}
+				continue
+			}
+			d = cancelBackoff[min(step, len(cancelBackoff)-1)]
+			step++
 		}
-		d := cancelBackoff[min(wait, len(cancelBackoff)-1)]
-		wait++
-		if s.t.now().Sub(start)+d >= budget {
-			return m.summary(round, CancelStoppedTimeBudget, res.HasMore), nil
+		if d > MaxServerWait || s.t.now().Sub(start)+d >= budget {
+			return m.summary(round, CancelStoppedTimeBudget, hasMore, lastCode), nil
 		}
 		if err := s.t.sleep(ctx, d); err != nil {
-			return m.summary(round, "", res.HasMore), err
+			return m.summary(round, "", hasMore, lastCode), err
 		}
 	}
 }
@@ -619,9 +664,9 @@ func (m *cancelMerge) add(r CancelAllResult) {
 	}
 }
 
-func (m *cancelMerge) summary(rounds int, stopped string, hasMore bool) CancelAllSummary {
+func (m *cancelMerge) summary(rounds int, stopped string, hasMore bool, lastErrorCode string) CancelAllSummary {
 	out := CancelAllSummary{Cancelled: []string{}, AlreadyClosed: []string{}, Failed: []string{},
-		Failures: []CancelFailure{}, HasMore: hasMore, Rounds: rounds, Stopped: stopped}
+		Failures: []CancelFailure{}, HasMore: hasMore, Rounds: rounds, Stopped: stopped, LastErrorCode: lastErrorCode}
 	for _, id := range m.order {
 		switch m.state[id] {
 		case "cancelled":
