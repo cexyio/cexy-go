@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -166,16 +167,39 @@ func TestCancelAllNeedsExplicitTarget(t *testing.T) {
 	}
 }
 
-func TestOrderEndpointsSendIdempotencyKeyButDoNotRelyOnIt(t *testing.T) {
+// Idempotency-Key policy: only pool join and exit send one (the only endpoints that honour it).
+func TestIdempotencyKeyOnlyOnPoolJoinAndExit(t *testing.T) {
 	c, rec, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret}, func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, placeResponse())
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/trading/orders") && r.Method == http.MethodPost:
+			writeJSON(w, 200, placeResponse())
+		case r.Method == http.MethodDelete:
+			writeJSON(w, 200, dataEnv(testOrder))
+		default:
+			writeJSON(w, 200, dataEnv(map[string]any{"base_amount": "1", "quote_amount": "1", "shares": "1"}))
+		}
 	})
-	if _, err := c.Trading.PlaceOrder(context.Background(), PlaceOrderRequest{Symbol: "BTC/USDT", Side: OrderSideBuy,
-		Type: OrderTypeMarket, Quantity: Ptr(Amount("1"))}); err != nil {
+	ctx := context.Background()
+	if _, err := c.Trading.PlaceOrder(ctx, PlaceOrderRequest{Symbol: "BTC/USDT", Side: OrderSideBuy,
+		Type: OrderTypeMarket, Quantity: Ptr(Amount("1"))}, WithIdempotencyKey("ignored")); err != nil {
 		t.Fatal(err)
 	}
-	req, _ := rec.get(0)
-	if req.Header.Get("Idempotency-Key") == "" {
-		t.Fatal("no Idempotency-Key header")
+	if _, err := c.Trading.CancelOrder(ctx, "ord_1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Pools.Join(ctx, "BTC/USDT", JoinPoolRequest{BaseAmount: "1", QuoteAmount: "60000"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Pools.Exit(ctx, "BTC/USDT", ExitPoolRequest{Shares: "1"}, WithIdempotencyKey("mine-1")); err != nil {
+		t.Fatal(err)
+	}
+	for i, want := range []bool{false, false, true, true} {
+		req, _ := rec.get(i)
+		if got := req.Header.Get("Idempotency-Key") != ""; got != want {
+			t.Fatalf("request %d (%s %s): Idempotency-Key sent=%v, want %v", i, req.Method, req.URL.Path, got, want)
+		}
+	}
+	if req, _ := rec.get(3); req.Header.Get("Idempotency-Key") != "mine-1" {
+		t.Fatalf("exit key %q", req.Header.Get("Idempotency-Key"))
 	}
 }

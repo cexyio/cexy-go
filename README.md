@@ -14,7 +14,7 @@ The official Go SDK for the [CEXY.io](https://cexy.io) REST and WebSocket API.
 ## Install
 
 ```bash
-go get github.com/cexyio/cexy-go@v0.1.0-dev.2
+go get github.com/cexyio/cexy-go@v0.1.0-dev.3
 ```
 
 ```go
@@ -76,10 +76,13 @@ sum, err := c.Trading.CancelAllUntilDone(ctx, cexy.CancelAllOptions{Symbol: "BTC
 ```
 
 It calls again while `HasMore` is set or an order failed with `INVALID_STATE` or
-`SERVICE_UNAVAILABLE`. After a round with no progress it waits 1, 2, 4, 8, then 15 s, and it
-stops after `MaxRounds` calls (default 20) or before a wait would reach `TimeBudget` (default
-120 s). A rate-limit wait counts against the budget. Rounds are merged by order id: the latest
-state wins.
+`SERVICE_UNAVAILABLE`. Each round is exactly one HTTP request (the loop owns the retries), so it
+never sends more than `MaxRounds` requests (default 20). After a round with no progress it waits
+1, 2, 4, 8, then 15 s. A round that fails with a retryable error counts as a round: after a 429 it
+waits the server's `Retry-After` exactly, after other retryable errors the next back-off step. It
+never takes a wait that would reach `TimeBudget` (default 120 s): it stops with `Stopped:
+"time_budget"` and `LastErrorCode` set. A non-retryable error is returned with the summary so far.
+Rounds are merged by order id: the latest state wins.
 
 Give both `APIKey` and `APISecret`, or neither: `New` returns a `*ConfigError` for only one.
 
@@ -152,10 +155,15 @@ case err != nil:
 
 - Timeout per attempt: `Options.Timeout` (default 10 s). Retries: `Options.MaxRetries` (default 3; `NoRetries` turns them off), exponential backoff with full jitter.
 - Retried: connection errors, timeouts and responses with `retryable: true`.
-- A 429 waits at least `Retry-After` / `details.retry_after_seconds`.
+- A 429 waits `Retry-After` / `details.retry_after_seconds` (plus up to 250 ms of jitter). Server
+  wait hints are untrusted: unparseable or absurd values are ignored, and a hint above
+  `cexy.MaxServerWait` (120 s) is not waited. The call fails at once with the rate-limit
+  `APIError`, whose `RetryAfter` still holds the server's value. The client-side rate limiter
+  never blocks longer than `MaxServerWait` because of a server hint.
 - GETs retry freely.
-- **Orders:** safety rests on `client_order_id`, not on `Idempotency-Key` (the server does not honour
-  that header on orders, order cancels or cancel-all). `PlaceOrder` always sends a `client_order_id`
+- **Idempotency-Key** is sent only on pool join and exit, the only endpoints that honour it. Orders,
+  order cancels and cancel-all send none.
+- **Orders:** safety rests on `client_order_id`. `PlaceOrder` always sends a `client_order_id`
   (a UUID if you do not set one); it is unique per account and a repeat is refused before any funds
   move. After an ambiguous failure (connection error, timeout, 5xx) the SDK first looks the order up by
   that id. If the order exists it is returned with `Recovered: true`; only if it does not exist is it
@@ -166,7 +174,7 @@ case err != nil:
   repeatable and is retried the same way (a retry reports only what it cancelled).
 - **Pool join and exit** send a generated `Idempotency-Key`, reused on every retry; the server honours
   it there, so they execute once. A 409 `CONCURRENT_MODIFICATION` (the same key still in flight) is
-  retried with the same key. `cexy.WithIdempotencyKey(k)` sets it yourself.
+  retried with the same key. `cexy.WithIdempotencyKey(k)` sets it yourself (ignored on other calls).
 - `Options.OnRetry` lets you log retries.
 
 Every method takes a context and optional `CallOption`s: `cexy.WithTimeout(d)`,
@@ -267,7 +275,8 @@ channels keep working.
 - Only `https://` base URLs and `wss://` WebSocket URLs are accepted. `AllowInsecure` permits
   `http://` / `ws://` solely for `localhost`, `127.0.0.1` or `::1` (local test servers).
 - The SDK redacts the secret from `fmt` output (`%v`, `%+v`, `%#v`), `log/slog` and error messages,
-  including values the server echoes back in `APIError.Details` and `Fields`.
+  including anything the server echoes back in `APIError.Details` and `Fields`: nested values and
+  object keys too.
 - Keep keys in environment variables or a secret manager, not in code.
 
 Report vulnerabilities as described in [SECURITY.md](SECURITY.md).

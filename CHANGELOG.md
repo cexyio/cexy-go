@@ -6,6 +6,29 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-dev.3]
+
+Patch round from the cexy-rust pre-publication review, whose findings apply to every SDK.
+
+### Fixed
+- **Server-controlled waits are bounded.** `Retry-After` (seconds or HTTP-date),
+  `details.retry_after_seconds` and `X-RateLimit-Reset` are untrusted: unparseable, negative, NaN or
+  infinite values are ignored, huge values saturate instead of overflowing, and a hint above the new
+  `MaxServerWait` (120 s) is not waited. The call fails at once with the rate-limit `APIError`,
+  whose `RetryAfter` keeps the server's value. The rate limiter never blocks longer than 120 s
+  because of a server hint, and ignores an `X-RateLimit-Limit` below 1.
+- **`CancelAllUntilDone` owns its retries.** Each round is exactly one HTTP request, so the loop
+  sends at most `MaxRounds` requests even when rounds fail. Previously each round could retry 3
+  times. A 429 waits `Retry-After` exactly, other retryable errors take the next back-off step, and
+  a wait that would reach the budget is never taken: the loop stops with `time_budget` and the new
+  `CancelAllSummary.LastErrorCode`.
+- Credentials echoed back by the server are redacted in nested `APIError.Details` values and in
+  object keys (of `Details` and `Fields`), not only in top-level strings.
+
+### Changed
+- `Idempotency-Key` is sent only on pool join and exit, the only endpoints that honour it. Orders
+  and order cancels no longer send one; `WithIdempotencyKey` is ignored on other calls.
+
 ## [0.1.0-dev.2]
 
 Cancel-all v2 (the API change of 2026-09-27).
