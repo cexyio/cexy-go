@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- `CancelAllUntilDone` counts a pending client-side rate-limiter block (for example after
+  `X-RateLimit-Remaining: 0` with a `X-RateLimit-Reset`) against its time budget before each round. If
+  the block would reach the budget, the loop stops with `time_budget` and `LastErrorCode` `RATE_LIMITED`
+  without calling, instead of stalling past the budget inside the limiter.
+
+### CI
+- New `consumer` job: builds and runs `ci/consumer`, a separate module that depends on the SDK the way
+  a user's program does (a `replace` to the checkout), so test-only code cannot mask a missing piece.
+
 ## [0.1.0-dev.3]
 
 Patch round from the cexy-rust pre-publication review, whose findings apply to every SDK.
