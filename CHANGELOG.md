@@ -10,6 +10,12 @@ All notable changes to this project are documented here. The format follows
 
 Sync with API release H-1.
 
+### Security
+- Minimum Go is now **1.26.6** (`go` directive), a security floor for the standard-library
+  vulnerabilities GO-2026-6218 (net/url), GO-2026-6090 (crypto/tls) and GO-2026-5972
+  (encoding/asn1), all fixed in Go 1.26.6. The SDK uses `net/url` and `crypto/tls`, so building
+  with Go 1.26.0–1.26.5 was exposed through the standard library.
+
 ### Added
 - `LedgerEntry.Reference` is a typed `LedgerReference` (it was `json.RawMessage`): `Type` says the
   variant (`deposit`, `withdrawal`, `order`, `trade`, `transfer`, `adjustment`, `pool`,
