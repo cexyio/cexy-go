@@ -126,6 +126,7 @@ func TestErrorMapping(t *testing.T) {
 		{404, "NOT_FOUND", ErrNotFound},
 		{409, "ALREADY_EXISTS", ErrConflict},
 		{422, "INSUFFICIENT_FUNDS", ErrUnprocessable},
+		{422, "PRICE_UNAVAILABLE", ErrUnprocessable},
 		{429, "RATE_LIMITED", ErrRateLimited},
 		{503, "SERVICE_UNAVAILABLE", ErrServer},
 	}

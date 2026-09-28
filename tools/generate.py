@@ -61,6 +61,8 @@ def camel(name: str) -> str:
 def go_name(schema: str) -> str:
     if schema in RENAMES:
         return RENAMES[schema]
+    if re.fullmatch(r"[A-Z][A-Za-z]*Id", schema):  # id aliases: OrderId -> OrderID
+        return schema[:-2] + "ID"
     name = schema[: -len("Response")] if schema.endswith("Response") else schema
     return re.sub(r"^Api(?=[A-Z]|$)", "API", name)
 
@@ -92,6 +94,15 @@ class Gen:
         s = self.schemas[name]
         return s.get("type") == "object" and "properties" in s
 
+    def is_alias(self, name: str) -> bool:
+        """A plain string schema without an enum (the id types): a Go alias of string."""
+        s = self.schemas[name]
+        return s.get("type") == "string" and "enum" not in s and "format" not in s
+
+    def is_union(self, name: str) -> bool:
+        s = self.schemas[name]
+        return "oneOf" in s and (s.get("discriminator") or {}).get("propertyName") == "type"
+
     def base_type(self, s: dict) -> tuple[str, bool]:
         """Go type for a schema, and whether it may be a pointer (false for slices/maps/any)."""
         if "$ref" in s:
@@ -100,7 +111,7 @@ class Gen:
                 return "Amount", True
             if name == "DetailValue":
                 return "any", False
-            return go_name(name), True
+            return go_name(name), True  # structs, enums, id aliases and unions alike
         if "allOf" in s and len(s["allOf"]) == 1:
             return self.base_type(s["allOf"][0])
         t = s.get("type")
@@ -146,6 +157,10 @@ class Gen:
                 out.append(self.enum(gname, s))
             elif self.is_struct(name):
                 out.append(self.struct(gname, s))
+            elif self.is_alias(name):
+                out.append(self.alias(gname, s))
+            elif self.is_union(name):
+                out.append(self.union(gname, s))
             else:
                 raise SystemExit(f"schema {name} is neither an enum nor an object")
         body = "\n".join(out)
@@ -160,6 +175,56 @@ class Gen:
         for v in s["enum"]:
             lines.append(f"\t{gname}{camel(str(v))} {gname} = {json.dumps(v)}\n")
         lines.append(")\n")
+        return "".join(lines)
+
+    def alias(self, gname: str, s: dict) -> str:
+        doc = comment(s.get("description"), name=gname) or f"// {gname} is an API identifier.\n"
+        doc += "//\n// An alias of string: its format is not checked, so a future format keeps working.\n"
+        return doc + f"type {gname} = string\n"
+
+    def union(self, gname: str, s: dict) -> str:
+        """A oneOf told apart by "type": one struct with Type and a pointer per variant field,
+        plus the raw JSON. Decoding never fails on an unknown type (Type keeps the value,
+        Raw the object)."""
+        variants = s["oneOf"]
+        kinds: list[tuple[str, str]] = []
+        fields: dict[str, tuple[dict, list[str]]] = {}
+        for v in variants:
+            kind = v["properties"]["type"]["enum"][0]
+            kinds.append((kind, v.get("description") or ""))
+            for prop, ps in v["properties"].items():
+                if prop == "type":
+                    continue
+                if prop in fields and fields[prop][0] != ps:
+                    raise SystemExit(f"{gname}.{prop} differs between variants")
+                fields.setdefault(prop, (ps, []))[1].append(kind)
+        tname = gname + "Type"
+        doc = comment(s.get("description"), name=gname)
+        doc += ("//\n// Type says which variant it is; only that variant's fields are set. A type added to\n"
+                "// the API later decodes without error: Type holds it and Raw the whole object.\n")
+        lines = [doc + f"type {gname} struct {{\n", f"\tType {tname} `json:\"type\"`\n"]
+        for prop in sorted(fields):
+            ps, used = fields[prop]
+            typ, _ = self.base_type(ps)
+            lines.append(comment((ps.get("description") or "").strip() + f"\n\nSet for type {', '.join(used)}.", "\t"))
+            lines.append(f'\t{camel(prop)} *{typ} `json:"{prop},omitempty"`\n')
+        lines.append("\t// Raw is the object as received (nil for values built in code).\n")
+        lines.append("\tRaw json.RawMessage `json:\"-\"`\n}\n\n")
+        lines.append(f"// {tname} tells the variants of {gname} apart. The type is open.\n"
+                     f"type {tname} string\n\nconst (\n")
+        for kind, d in kinds:
+            lines.append(comment(d, "\t"))
+            lines.append(f"\t{tname}{camel(kind)} {tname} = {json.dumps(kind)}\n")
+        lines.append(")\n\n")
+        lines.append(f"// Known reports whether Type is one this SDK version knows.\nfunc (r {gname}) Known() bool {{\n"
+                     f"\tswitch r.Type {{\n\tcase {', '.join(tname + camel(k) for k, _ in kinds)}:\n"
+                     "\t\treturn true\n\t}\n\treturn false\n}\n\n")
+        lines.append(f"// UnmarshalJSON keeps the raw object and never fails on an unknown variant.\n"
+                     f"func (r *{gname}) UnmarshalJSON(b []byte) error {{\n"
+                     f"\ttype plain {gname}\n\tvar p plain\n"
+                     "\tif err := json.Unmarshal(b, &p); err != nil {\n"
+                     f"\t\t*r = {gname}{{Raw: append(json.RawMessage(nil), b...)}}\n\t\treturn nil\n\t}}\n"
+                     f"\t*r = {gname}(p)\n\tr.Raw = append(json.RawMessage(nil), b...)\n\treturn nil\n}}\n")
         return "".join(lines)
 
     def struct(self, gname: str, s: dict) -> str:

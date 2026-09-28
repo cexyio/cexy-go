@@ -208,6 +208,11 @@ type DepositAddress struct {
 	Network string `json:"network"`
 }
 
+// DepositID: Unique identifier of a deposit.
+//
+// An alias of string: its format is not checked, so a future format keeps working.
+type DepositID = string
+
 // Deposit: A deposit.
 type Deposit struct {
 	// Address that received it.
@@ -336,11 +341,15 @@ type Fill struct {
 	TradeID string `json:"trade_id"`
 }
 
+// FuturesTransferID: Unique identifier of a futures collateral transfer.
+//
+// An alias of string: its format is not checked, so a future format keeps working.
+type FuturesTransferID = string
+
 // JoinPoolRequest: Adds liquidity to a pool.
 type JoinPoolRequest struct {
-	BaseAmount Amount `json:"base_amount"`
-	// How far, in percent, the offered ratio may sit from the pool's own before the request is refused rather than repriced. Defaults to 1%.
-	MaxRatioDeviationPercent *string `json:"max_ratio_deviation_percent,omitempty"`
+	BaseAmount               Amount  `json:"base_amount"`
+	MaxRatioDeviationPercent *Amount `json:"max_ratio_deviation_percent,omitempty"`
 	QuoteAmount              Amount  `json:"quote_amount"`
 }
 
@@ -358,36 +367,41 @@ type JoinPoolResult struct {
 type LedgerEntryKind string
 
 const (
-	LedgerEntryKindDeposit                    LedgerEntryKind = "deposit"
-	LedgerEntryKindDepositReversal            LedgerEntryKind = "deposit_reversal"
-	LedgerEntryKindWithdrawalDebit            LedgerEntryKind = "withdrawal_debit"
-	LedgerEntryKindWithdrawalFee              LedgerEntryKind = "withdrawal_fee"
-	LedgerEntryKindWithdrawalFeeReserve       LedgerEntryKind = "withdrawal_fee_reserve"
-	LedgerEntryKindWithdrawalRelease          LedgerEntryKind = "withdrawal_release"
-	LedgerEntryKindWithdrawalFeeRelease       LedgerEntryKind = "withdrawal_fee_release"
-	LedgerEntryKindOrderReserve               LedgerEntryKind = "order_reserve"
-	LedgerEntryKindWithdrawalReserve          LedgerEntryKind = "withdrawal_reserve"
-	LedgerEntryKindOrderRelease               LedgerEntryKind = "order_release"
-	LedgerEntryKindTradeDebit                 LedgerEntryKind = "trade_debit"
-	LedgerEntryKindTradeCredit                LedgerEntryKind = "trade_credit"
-	LedgerEntryKindTradeFee                   LedgerEntryKind = "trade_fee"
-	LedgerEntryKindTransferOut                LedgerEntryKind = "transfer_out"
-	LedgerEntryKindTransferIn                 LedgerEntryKind = "transfer_in"
-	LedgerEntryKindAdjustmentCredit           LedgerEntryKind = "adjustment_credit"
-	LedgerEntryKindAdjustmentDebit            LedgerEntryKind = "adjustment_debit"
-	LedgerEntryKindRebate                     LedgerEntryKind = "rebate"
-	LedgerEntryKindPoolJoin                   LedgerEntryKind = "pool_join"
-	LedgerEntryKindPoolExit                   LedgerEntryKind = "pool_exit"
-	LedgerEntryKindFuturesTransferReserve     LedgerEntryKind = "futures_transfer_reserve"
-	LedgerEntryKindFuturesTransferRelease     LedgerEntryKind = "futures_transfer_release"
-	LedgerEntryKindFuturesCollateralSent      LedgerEntryKind = "futures_collateral_sent"
-	LedgerEntryKindFuturesCollateralReturned  LedgerEntryKind = "futures_collateral_returned"
-	LedgerEntryKindTradeFeeRevenue            LedgerEntryKind = "trade_fee_revenue"
-	LedgerEntryKindWithdrawalFeeRevenue       LedgerEntryKind = "withdrawal_fee_revenue"
-	LedgerEntryKindFuturesTransferFeeRevenue  LedgerEntryKind = "futures_transfer_fee_revenue"
-	LedgerEntryKindFuturesHyperliquidCost     LedgerEntryKind = "futures_hyperliquid_cost"
-	LedgerEntryKindFuturesTransferDiscrepancy LedgerEntryKind = "futures_transfer_discrepancy"
-	LedgerEntryKindExchangeCapital            LedgerEntryKind = "exchange_capital"
+	LedgerEntryKindDeposit                      LedgerEntryKind = "deposit"
+	LedgerEntryKindDepositReversal              LedgerEntryKind = "deposit_reversal"
+	LedgerEntryKindWithdrawalDebit              LedgerEntryKind = "withdrawal_debit"
+	LedgerEntryKindWithdrawalFee                LedgerEntryKind = "withdrawal_fee"
+	LedgerEntryKindWithdrawalFeeReserve         LedgerEntryKind = "withdrawal_fee_reserve"
+	LedgerEntryKindWithdrawalRelease            LedgerEntryKind = "withdrawal_release"
+	LedgerEntryKindWithdrawalFeeRelease         LedgerEntryKind = "withdrawal_fee_release"
+	LedgerEntryKindOrderReserve                 LedgerEntryKind = "order_reserve"
+	LedgerEntryKindWithdrawalReserve            LedgerEntryKind = "withdrawal_reserve"
+	LedgerEntryKindOrderRelease                 LedgerEntryKind = "order_release"
+	LedgerEntryKindTradeDebit                   LedgerEntryKind = "trade_debit"
+	LedgerEntryKindTradeCredit                  LedgerEntryKind = "trade_credit"
+	LedgerEntryKindTradeFee                     LedgerEntryKind = "trade_fee"
+	LedgerEntryKindTransferOut                  LedgerEntryKind = "transfer_out"
+	LedgerEntryKindTransferIn                   LedgerEntryKind = "transfer_in"
+	LedgerEntryKindTransferInHeld               LedgerEntryKind = "transfer_in_held"
+	LedgerEntryKindTransferRelease              LedgerEntryKind = "transfer_release"
+	LedgerEntryKindTransferReversal             LedgerEntryKind = "transfer_reversal"
+	LedgerEntryKindAdjustmentCredit             LedgerEntryKind = "adjustment_credit"
+	LedgerEntryKindAdjustmentDebit              LedgerEntryKind = "adjustment_debit"
+	LedgerEntryKindRebate                       LedgerEntryKind = "rebate"
+	LedgerEntryKindPoolJoin                     LedgerEntryKind = "pool_join"
+	LedgerEntryKindPoolExit                     LedgerEntryKind = "pool_exit"
+	LedgerEntryKindFuturesTransferReserve       LedgerEntryKind = "futures_transfer_reserve"
+	LedgerEntryKindFuturesTransferRelease       LedgerEntryKind = "futures_transfer_release"
+	LedgerEntryKindFuturesCollateralSent        LedgerEntryKind = "futures_collateral_sent"
+	LedgerEntryKindFuturesCollateralReturned    LedgerEntryKind = "futures_collateral_returned"
+	LedgerEntryKindTradeFeeRevenue              LedgerEntryKind = "trade_fee_revenue"
+	LedgerEntryKindWithdrawalFeeRevenue         LedgerEntryKind = "withdrawal_fee_revenue"
+	LedgerEntryKindWithdrawalRefund             LedgerEntryKind = "withdrawal_refund"
+	LedgerEntryKindWithdrawalFeeRevenueReversal LedgerEntryKind = "withdrawal_fee_revenue_reversal"
+	LedgerEntryKindFuturesTransferFeeRevenue    LedgerEntryKind = "futures_transfer_fee_revenue"
+	LedgerEntryKindFuturesHyperliquidCost       LedgerEntryKind = "futures_hyperliquid_cost"
+	LedgerEntryKindFuturesTransferDiscrepancy   LedgerEntryKind = "futures_transfer_discrepancy"
+	LedgerEntryKindExchangeCapital              LedgerEntryKind = "exchange_capital"
 )
 
 // LedgerEntry: One entry from the account's ledger.
@@ -403,10 +417,91 @@ type LedgerEntry struct {
 	Kind         LedgerEntryKind `json:"kind"`
 	LockedDelta  Amount          `json:"locked_delta"`
 	PendingDelta Amount          `json:"pending_delta"`
-	// What caused the entry.
-	Reference json.RawMessage `json:"reference"`
+	Reference    LedgerReference `json:"reference"`
 	// Position in this account's history for this asset.
 	Sequence int64 `json:"sequence"`
+}
+
+// LedgerReference: What caused a ledger entry: one kind of cause per variant, told apart by `type`.
+//
+// Type says which variant it is; only that variant's fields are set. A type added to
+// the API later decodes without error: Type holds it and Raw the whole object.
+type LedgerReference struct {
+	Type LedgerReferenceType `json:"type"`
+	// Short machine-readable cause.
+	//
+	// Set for type system.
+	Cause *string `json:"cause,omitempty"`
+	// Set for type transfer.
+	CounterpartyUserID *UserID `json:"counterparty_user_id,omitempty"`
+	// Set for type deposit.
+	DepositID *DepositID `json:"deposit_id,omitempty"`
+	// Set for type futures_transfer.
+	FuturesTransferID *FuturesTransferID `json:"futures_transfer_id,omitempty"`
+	// Set for type adjustment.
+	OperatorUserID *UserID `json:"operator_user_id,omitempty"`
+	// Set for type order, trade.
+	OrderID *OrderID `json:"order_id,omitempty"`
+	// Set for type pool.
+	PoolID *PoolID `json:"pool_id,omitempty"`
+	// Set for type trade.
+	TradeID *TradeID `json:"trade_id,omitempty"`
+	// Shared reference linking both halves.
+	//
+	// Set for type transfer.
+	TransferRef *string `json:"transfer_ref,omitempty"`
+	// Set for type withdrawal.
+	WithdrawalID *WithdrawalID `json:"withdrawal_id,omitempty"`
+	// Raw is the object as received (nil for values built in code).
+	Raw json.RawMessage `json:"-"`
+}
+
+// LedgerReferenceType tells the variants of LedgerReference apart. The type is open.
+type LedgerReferenceType string
+
+const (
+	// A blockchain deposit.
+	LedgerReferenceTypeDeposit LedgerReferenceType = "deposit"
+	// A withdrawal request.
+	LedgerReferenceTypeWithdrawal LedgerReferenceType = "withdrawal"
+	// An order reservation or release.
+	LedgerReferenceTypeOrder LedgerReferenceType = "order"
+	// A trade settlement.
+	LedgerReferenceTypeTrade LedgerReferenceType = "trade"
+	// An internal transfer between accounts.
+	LedgerReferenceTypeTransfer LedgerReferenceType = "transfer"
+	// A manual operator adjustment. Always accompanied by an audit event.
+	LedgerReferenceTypeAdjustment LedgerReferenceType = "adjustment"
+	// A liquidity pool join or exit.
+	LedgerReferenceTypePool LedgerReferenceType = "pool"
+	// A movement of collateral to or from a futures account.
+	//
+	// Every entry a transfer produces carries the same one, so the reservation, the release and the completion can be read back as one event — which is what an operator resolving an ambiguous transfer needs.
+	LedgerReferenceTypeFuturesTransfer LedgerReferenceType = "futures_transfer"
+	// A system-originated credit with no user counterparty (rebate, promotion).
+	LedgerReferenceTypeSystem LedgerReferenceType = "system"
+)
+
+// Known reports whether Type is one this SDK version knows.
+func (r LedgerReference) Known() bool {
+	switch r.Type {
+	case LedgerReferenceTypeDeposit, LedgerReferenceTypeWithdrawal, LedgerReferenceTypeOrder, LedgerReferenceTypeTrade, LedgerReferenceTypeTransfer, LedgerReferenceTypeAdjustment, LedgerReferenceTypePool, LedgerReferenceTypeFuturesTransfer, LedgerReferenceTypeSystem:
+		return true
+	}
+	return false
+}
+
+// UnmarshalJSON keeps the raw object and never fails on an unknown variant.
+func (r *LedgerReference) UnmarshalJSON(b []byte) error {
+	type plain LedgerReference
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		*r = LedgerReference{Raw: append(json.RawMessage(nil), b...)}
+		return nil
+	}
+	*r = LedgerReference(p)
+	r.Raw = append(json.RawMessage(nil), b...)
+	return nil
 }
 
 // LiquidityRole: Whether a fill added liquidity (maker) or removed it (taker).
@@ -571,6 +666,11 @@ type OrderBook struct {
 	Timestamp time.Time `json:"timestamp"`
 }
 
+// OrderID: Unique identifier of an order.
+//
+// An alias of string: its format is not checked, so a future format keeps working.
+type OrderID = string
+
 // Order: An order.
 type Order struct {
 	AveragePrice *Amount `json:"average_price,omitempty"`
@@ -683,6 +783,11 @@ type PlaceOrderResponse struct {
 	Order Order  `json:"order"`
 }
 
+// PoolID: Unique identifier of a liquidity pool.
+//
+// An alias of string: its format is not checked, so a future format keeps working.
+type PoolID = string
+
 // Pool: A pool as a client sees it.
 //
 // Reserves are the custody account's balances, so they include liquidity currently locked in resting orders. `price` is the curve's mid, which sits between the pool's own best bid and ask by exactly its fee — it is not a traded price.
@@ -776,6 +881,11 @@ const (
 	TimeInForcePostOnly TimeInForce = "post_only"
 )
 
+// TradeID: Unique identifier of a trade.
+//
+// An alias of string: its format is not checked, so a future format keeps working.
+type TradeID = string
+
 // TriggerDirection: Which way the price must move for a stop to fire.
 //
 // Explicit rather than inferred from the side, because the inference is ambiguous: a sell stop below the market is a stop-loss, and a sell stop above it is a take-profit. Both are legitimate, and guessing wrong means an order that fires at exactly the wrong moment — which is the one thing a protective order must never do.
@@ -787,6 +897,11 @@ const (
 	TriggerDirectionAbove TriggerDirection = "above"
 	TriggerDirectionBelow TriggerDirection = "below"
 )
+
+// UserID: Unique identifier of a user account.
+//
+// An alias of string: its format is not checked, so a future format keeps working.
+type UserID = string
 
 // WithdrawalAddress: A saved withdrawal address.
 type WithdrawalAddress struct {
@@ -818,6 +933,11 @@ type WithdrawalHistoryEntry struct {
 	Reason *string          `json:"reason,omitempty"`
 	Status WithdrawalStatus `json:"status"`
 }
+
+// WithdrawalID: Unique identifier of a withdrawal.
+//
+// An alias of string: its format is not checked, so a future format keeps working.
+type WithdrawalID = string
 
 // Withdrawal: A withdrawal.
 type Withdrawal struct {
@@ -874,4 +994,5 @@ const (
 	WithdrawalStatusCancelled        WithdrawalStatus = "cancelled"
 	WithdrawalStatusFailed           WithdrawalStatus = "failed"
 	WithdrawalStatusBroadcastUnknown WithdrawalStatus = "broadcast_unknown"
+	WithdrawalStatusReverted         WithdrawalStatus = "reverted"
 )
