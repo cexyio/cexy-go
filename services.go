@@ -570,6 +570,13 @@ func (s *TradingService) CancelAllUntilDone(ctx context.Context, o CancelAllOpti
 	step := 0
 	hasMore := false
 	for round := 1; ; round++ {
+		// A limiter block (e.g. X-RateLimit-Remaining 0 with a Reset) would stall the next request
+		// inside acquire, invisible to this loop: count it against the budget before calling.
+		if round > 1 && s.t.limiter != nil {
+			if w := s.t.limiter.pendingWait(); w > 0 && s.t.now().Sub(start)+w >= budget {
+				return m.summary(round-1, CancelStoppedTimeBudget, hasMore, string(CodeRateLimited)), nil
+			}
+		}
 		res, err := s.cancelAllRound(ctx, symbol, co)
 		lastCode := ""
 		var d time.Duration

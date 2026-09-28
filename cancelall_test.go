@@ -305,3 +305,37 @@ func TestCancelAllUntilDoneRefusesAWaitPastTheBudget(t *testing.T) {
 		t.Fatalf("summary %+v, sleeps %v", got, fs.all())
 	}
 }
+
+// QA: a limiter block (Remaining 0 plus a Reset) would stall the next round inside acquire,
+// invisible to the loop. It counts against the budget, and the loop stops without calling.
+func TestCancelAllUntilDoneCountsALimiterBlockAgainstTheBudget(t *testing.T) {
+	progress := map[string]any{"cancelled": []string{"o1"}, "already_closed": []string{}, "failed": []string{},
+		"failures": []map[string]string{}, "has_more": true}
+	c, rec, fs := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret},
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-RateLimit-Limit", "300")
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("X-RateLimit-Reset", "170")
+			writeJSON(w, 200, dataEnv(progress))
+		})
+	got, err := c.Trading.CancelAllUntilDone(context.Background(), CancelAllOptions{Symbol: "BTC/USDT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var total time.Duration
+	for _, d := range fs.all() {
+		total += d
+	}
+	if n := rec.count(); n != 1 {
+		t.Fatalf("%d requests, want 1", n)
+	}
+	if total >= 120*time.Second {
+		t.Fatalf("waited %v, past the 120 s budget", total)
+	}
+	if got.Stopped != CancelStoppedTimeBudget || got.LastErrorCode != string(CodeRateLimited) || got.Rounds != 1 {
+		t.Fatalf("summary %+v", got)
+	}
+	if !slices.Equal(got.Cancelled, []string{"o1"}) {
+		t.Fatalf("cancelled %v", got.Cancelled)
+	}
+}

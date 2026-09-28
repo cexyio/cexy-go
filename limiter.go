@@ -66,6 +66,23 @@ func (l *rateLimiter) acquire(ctx context.Context) error {
 	}
 }
 
+// pendingWait is how long acquire would block right now: a server-imposed block, or the wait
+// for the next token. It takes no token.
+func (l *rateLimiter) pendingWait() time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.refill()
+	now := l.now()
+	if now.Before(l.blockedUntil) {
+		return l.blockedUntil.Sub(now)
+	}
+	if l.tokens >= 1 {
+		return 0
+	}
+	perToken := time.Minute.Seconds() / l.rpm
+	return time.Duration(math.Ceil((1-l.tokens)*perToken*1000)) * time.Millisecond
+}
+
 // update adapts to the server's rate-limit headers.
 func (l *rateLimiter) update(h http.Header) {
 	l.mu.Lock()
