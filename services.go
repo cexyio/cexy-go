@@ -101,12 +101,9 @@ func (s *PoolsService) Get(ctx context.Context, symbol string, opts ...CallOptio
 // Join adds liquidity. Amounts are decimal strings. The Idempotency-Key (generated, or set
 // with WithIdempotencyKey) makes retries safe.
 func (s *PoolsService) Join(ctx context.Context, symbol string, req JoinPoolRequest, opts ...CallOption) (JoinPoolResult, error) {
-	var maxDev *Amount
-	if req.MaxRatioDeviationPercent != nil {
-		maxDev = Ptr(Amount(*req.MaxRatioDeviationPercent))
-	}
 	if err := checkAmounts("Pools.Join", amountField{"base_amount", &req.BaseAmount},
-		amountField{"quote_amount", &req.QuoteAmount}, amountField{"max_ratio_deviation_percent", maxDev}); err != nil {
+		amountField{"quote_amount", &req.QuoteAmount},
+		amountField{"max_ratio_deviation_percent", req.MaxRatioDeviationPercent}); err != nil {
 		return JoinPoolResult{}, err
 	}
 	return getData[JoinPoolResult](ctx, s.t, call{op: OpJoinPool, pathParams: map[string]string{"symbol": symbol}, body: req,
@@ -431,7 +428,8 @@ func (s *TradingService) CancelOrder(ctx context.Context, orderID string, opts .
 	}
 }
 
-// CancelAll cancels every open order in one market, such as "BTC/USDT", in one request. An
+// CancelAll cancels every open order in one market, such as "BTC/USDT", in one request,
+// including stop orders that have not triggered yet (status pending_trigger). An
 // empty symbol is an error, so an account-wide cancel never happens by accident; use
 // CancelAllMarkets for that. An unknown symbol is an APIError matching ErrNotFound.
 //

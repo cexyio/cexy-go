@@ -6,6 +6,26 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-dev.4] (2026-09-28)
+
+Sync with API release H-1.
+
+### Added
+- `LedgerEntry.Reference` is a typed `LedgerReference` (it was `json.RawMessage`): `Type` says the
+  variant (`deposit`, `withdrawal`, `order`, `trade`, `transfer`, `adjustment`, `pool`,
+  `futures_transfer`, `system`) and only that variant's id fields are set. An unknown variant never
+  fails decoding: `Type` holds it, `Raw` keeps the object, `Known()` reports false.
+- Id aliases `DepositID`, `FuturesTransferID`, `OrderID`, `PoolID`, `TradeID`, `UserID`, `WithdrawalID`
+  (all `= string`, not validated).
+- Error code `CodePriceUnavailable` (`PRICE_UNAVAILABLE`, HTTP 422: matches `ErrUnprocessable`).
+- `WithdrawalStatusReverted` (a failed on-chain transaction, refunded by the exchange) and the new
+  `LedgerEntryKind` values (`transfer_in_held`, `transfer_release`, `transfer_reversal`,
+  `withdrawal_fee_revenue_reversal`, `withdrawal_refund`).
+
+### Changed
+- `JoinPoolRequest.MaxRatioDeviationPercent` is `*Amount` (was `*string`), and still validated.
+- Cancel-all also cancels stop orders that have not triggered yet (`pending_trigger`); documented.
+
 ### Fixed
 - `CancelAllUntilDone` counts a pending client-side rate-limiter block (for example after
   `X-RateLimit-Remaining: 0` with a `X-RateLimit-Reset`) against its time budget before each round. If

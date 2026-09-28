@@ -14,7 +14,7 @@ The official Go SDK for the [CEXY.io](https://cexy.io) REST and WebSocket API.
 ## Install
 
 ```bash
-go get github.com/cexyio/cexy-go@v0.1.0-dev.3
+go get github.com/cexyio/cexy-go@v0.1.0-dev.4
 ```
 
 ```go
@@ -64,6 +64,8 @@ _, err = c.Trading.CancelAll(ctx, "BTC/USDT") // CancelAllMarkets(ctx) = every m
 
 `CancelAll` requires a symbol: the server treats a missing symbol as "every market", so that is a
 separate method, `CancelAllMarkets`. The server allows cancel-all 30 times a minute per account.
+Cancel-all also cancels stop orders that have not triggered yet (status `pending_trigger`) and
+releases their reservations, so nothing fires into the market after the call.
 
 One cancel-all call handles at most 500 orders. Each order it handled is in exactly one of
 `Cancelled`, `AlreadyClosed` (it closed on its own first; not an error) and `Failed`, with the

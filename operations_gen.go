@@ -146,6 +146,7 @@ const (
 	CodeWithdrawalDisabled     ErrorCode = "WITHDRAWAL_DISABLED"
 	CodeSelfTradeBlocked       ErrorCode = "SELF_TRADE_BLOCKED"
 	CodeLimitExceeded          ErrorCode = "LIMIT_EXCEEDED"
+	CodePriceUnavailable       ErrorCode = "PRICE_UNAVAILABLE"
 	CodeRateLimited            ErrorCode = "RATE_LIMITED"
 	CodeInternal               ErrorCode = "INTERNAL"
 	CodeServiceUnavailable     ErrorCode = "SERVICE_UNAVAILABLE"
@@ -193,6 +194,7 @@ var knownErrorCodes = map[ErrorCode]bool{
 	CodeWithdrawalDisabled:     true,
 	CodeSelfTradeBlocked:       true,
 	CodeLimitExceeded:          true,
+	CodePriceUnavailable:       true,
 	CodeRateLimited:            true,
 	CodeInternal:               true,
 	CodeServiceUnavailable:     true,
