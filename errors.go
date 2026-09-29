@@ -134,7 +134,7 @@ var statusKinds = map[int]error{
 	451: ErrJurisdictionBlocked,
 }
 
-var defaultRetryableStatus = map[int]bool{408: true, 429: true, 500: true, 502: true, 503: true, 504: true}
+var defaultRetryableStatus = map[int]bool{429: true, 500: true, 502: true, 503: true, 504: true}
 
 type envelope struct {
 	Error *struct {
@@ -322,7 +322,8 @@ func secondsDuration(secs float64) time.Duration {
 }
 
 // isRetryable: a connection failure, or an API error marked retryable (including 409
-// CONCURRENT_MODIFICATION).
+// CONCURRENT_MODIFICATION). A 4xx is never retryable except 429 and 409
+// CONCURRENT_MODIFICATION, whatever its body says.
 func isRetryable(err error) bool {
 	var ce *ConnectionError
 	if errors.As(err, &ce) {
@@ -330,7 +331,11 @@ func isRetryable(err error) bool {
 	}
 	var ae *APIError
 	if errors.As(err, &ae) {
-		return ae.Retryable || ae.Code == CodeConcurrentModification
+		concurrent := ae.Code == CodeConcurrentModification
+		if ae.Status >= 400 && ae.Status < 500 && ae.Status != 429 && !(ae.Status == 409 && concurrent) {
+			return false
+		}
+		return ae.Retryable || concurrent
 	}
 	return false
 }

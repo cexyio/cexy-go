@@ -14,7 +14,7 @@ The official Go SDK for the [CEXY.io](https://cexy.io) REST and WebSocket API.
 ## Install
 
 ```bash
-go get github.com/cexyio/cexy-go@v0.1.0-dev.4
+go get github.com/cexyio/cexy-go@v0.1.0-dev.5
 ```
 
 ```go
@@ -49,6 +49,8 @@ c, err := cexy.New(cexy.Options{
 })
 
 balances, err := c.Account.Balances(ctx)
+// A sub-account's balances (parent account only; same shape, incl. HeldIncoming):
+subBalances, err := c.Account.SubAccountBalances(ctx, "sub-account-id")
 open, err := c.Trading.OpenOrders(ctx, &cexy.ListOpenOrdersParams{Symbol: cexy.Ptr("BTC/USDT")})
 
 placed, err := c.Trading.PlaceOrder(ctx, cexy.PlaceOrderRequest{
@@ -93,7 +95,7 @@ Give both `APIKey` and `APISecret`, or neither: `New` returns a `*ConfigError` f
 | `Markets` | `List`, `Get`, `OrderBook`, `Trades`, `AllTrades`, `Candles` | public |
 | `Assets`, `Networks`, `Fees`, `Pools` | `List`, `Get` / `List` / `List` / `List`, `Get` | public |
 | `Time`, `Config` (on `Client`) | | public |
-| `Account` | `Balances`, `Balance`, `Ledger`, `Notifications`, `SubAccounts`, `APIKeys` (+ `All…` iterators) | read |
+| `Account` | `Balances`, `Balance`, `Ledger`, `Notifications`, `SubAccounts`, `SubAccountBalances`, `APIKeys` (+ `All…` iterators) | read |
 | `Exports` | `Deposits`, `Ledger`, `Orders`, `Trades`, `Withdrawals` (CSV text) | read |
 | `Wallet` | `Deposits`, `Deposit`, `Withdrawals`, `Withdrawal`, `WithdrawalAddresses`, `DepositAddress` (+ iterators) | read |
 | `Trading` | `OpenOrders`, `Order`, `OrderByClientID`, `OrderHistory`, `Trades` (+ iterators) | read |
@@ -165,7 +167,9 @@ case err != nil:
 ## Retries and idempotency
 
 - Timeout per attempt: `Options.Timeout` (default 10 s). Retries: `Options.MaxRetries` (default 3; `NoRetries` turns them off), exponential backoff with full jitter.
-- Retried: connection errors, timeouts and responses with `retryable: true`.
+- Retried: connection errors, timeouts and responses with `retryable: true` (and 409
+  `CONCURRENT_MODIFICATION`). A 4xx is never retried except 429 and 409 `CONCURRENT_MODIFICATION`,
+  whatever its body says.
 - A 429 waits `Retry-After` / `details.retry_after_seconds` (plus up to 250 ms of jitter). Server
   wait hints are untrusted: unparseable or absurd values are ignored, and a hint above
   `cexy.MaxServerWait` (120 s) is not waited. The call fails at once with the rate-limit
@@ -180,8 +184,9 @@ case err != nil:
   that id. If the order exists it is returned with `Recovered: true`; only if it does not exist is it
   sent again, with the same id. If even the lookup fails you get `*OrderStateUnknownError`: check
   `Trading.OrderByClientID` before placing the order again.
-- **Cancels:** `CancelOrder` retries connection errors; if a *retry* gets `INVALID_STATE`, the first
-  attempt already cancelled the order, so the SDK fetches and returns it. Cancel-all is naturally
+- **Cancels:** `CancelOrder` is retried like a read: on connection errors, timeouts and retryable
+  responses (such as a 503, a 429, or a 409 `CONCURRENT_MODIFICATION`). If a *retry* gets
+  `INVALID_STATE`, the first attempt already cancelled the order, so the SDK fetches and returns it. Cancel-all is naturally
   repeatable and is retried the same way (a retry reports only what it cancelled).
 - **Pool join and exit** send a generated `Idempotency-Key`, reused on every retry; the server honours
   it there, so they execute once. A 409 `CONCURRENT_MODIFICATION` (the same key still in flight) is

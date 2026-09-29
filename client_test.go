@@ -266,8 +266,8 @@ func TestOperationsMatchSpec(t *testing.T) {
 			}
 		}
 	}
-	if seen != len(operations) || seen != 40 {
-		t.Fatalf("spec has %d operations, table %d (want 40)", seen, len(operations))
+	if seen != len(operations) || seen != 41 {
+		t.Fatalf("spec has %d operations, table %d (want 41)", seen, len(operations))
 	}
 }
 

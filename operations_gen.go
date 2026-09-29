@@ -54,6 +54,7 @@ const (
 	OpOrderHistory            OperationID = "order_history"
 	OpPlaceOrder              OperationID = "place_order"
 	OpServerTime              OperationID = "server_time"
+	OpSubAccountBalances      OperationID = "sub_account_balances"
 	OpTradeHistory            OperationID = "trade_history"
 )
 
@@ -98,6 +99,7 @@ var operations = map[OperationID]OperationInfo{
 	OpOrderHistory:            {Method: "GET", Path: "/api/v1/trading/orders/history", Auth: "api_key", Scope: "read"},
 	OpPlaceOrder:              {Method: "POST", Path: "/api/v1/trading/orders", Auth: "api_key", Scope: "trade"},
 	OpServerTime:              {Method: "GET", Path: "/api/v1/time", Auth: "none", Scope: ""},
+	OpSubAccountBalances:      {Method: "GET", Path: "/api/v1/account/sub-accounts/{id}/balances", Auth: "api_key", Scope: "read"},
 	OpTradeHistory:            {Method: "GET", Path: "/api/v1/trading/trades", Auth: "api_key", Scope: "read"},
 }
 

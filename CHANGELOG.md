@@ -6,14 +6,38 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-dev.5] (2026-09-29)
+
 ### CI
 - New `vuln-min-go` job (also weekly): runs govulncheck with the minimum Go that `go.mod` allows, so
-  a stale security floor is caught when a new standard-library advisory appears.
+  a stale security floor is caught when a new standard-library advisory appears. When the weekly run
+  fails, a separate `security-floor-issue` job opens (or updates) one issue labelled
+  `security-floor`; only that job has `issues: write` (`vuln-min-go` itself is `contents: read`), and
+  it gets the govulncheck output as an artifact.
 
 ### Added
 - `Balance.HeldIncoming` (`[]HeldIncoming`: `TransferID`, `Amount`, `AvailableAt`): incoming internal
   transfers still held, at most 100, soonest first. Their sum is already included in `Locked`: never
   add it again. `Balances`/`Balance` never return a nil slice (empty when the server omits it).
+- `Account.SubAccountBalances(ctx, id)`: a sub-account's balances, read by its parent account
+  (`GET /account/sub-accounts/{id}/balances`, read scope). Same `[]Balance` as `Balances`, including
+  `HeldIncoming`. An id that is not the caller's sub-account matches `ErrNotFound` (not retried); an
+  empty id is a `*ConfigError` before any request.
+
+### Changed
+- A 4xx response is never retried except 429 and 409 `CONCURRENT_MODIFICATION`, even when its body
+  says `retryable: true`. A 408 is no longer retried either, and its default `Retryable` (no field in
+  the body) is now false. 409 `CONCURRENT_MODIFICATION` and 429
+  are still retried only where they were before. A mutation sent through the shared retry loop is
+  retried only when it is repeat-safe (pool join/exit with their `Idempotency-Key`, cancel-all);
+  `PlaceOrder` and `CancelOrder` keep their own policies.
+
+### Security
+- Path values `"."` and `".."` are rejected with a `*ConfigError`: previously they were sent as a
+  literal dot segment, which the server's router or a proxy may resolve, so e.g.
+  `SubAccountBalances("..")` could return the parent's own balances and `OrderByClientID("..")` the
+  open-orders list. A write request could at most be redirected to a route that does not exist and
+  is refused by the server; no write could reach a different operation.
 
 ## [0.1.0-dev.4] (2026-09-28)
 

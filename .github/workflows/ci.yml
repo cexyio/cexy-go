@@ -99,7 +99,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      issues: write # only for the failure step below, on the weekly schedule
     defaults:
       run: {working-directory: cexy-go}
     env:
@@ -119,10 +118,38 @@ jobs:
         run: |
           set -o pipefail
           go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./... | tee "$RUNNER_TEMP/govulncheck.txt"
-      # A red scheduled run only emails whoever last edited the schedule, so on the weekly run a
-      # failure opens (or updates) one issue labelled security-floor, visible in the repository.
-      - name: Open or update the security-floor issue (weekly run only)
-        if: failure() && github.event_name == 'schedule'
+      # Handed to security-floor-issue, the only job that may write issues.
+      - name: Keep the govulncheck output
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: govulncheck-min-go
+          path: ${{ runner.temp }}/govulncheck.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # A red scheduled run only emails whoever last edited the schedule, so when the weekly
+  # vuln-min-go run fails, this job opens (or updates) one issue labelled security-floor,
+  # visible in the repository. It is the only job with issues: write, and it runs no build,
+  # test or scanner: it reads go.mod and the govulncheck output handed over by vuln-min-go.
+  security-floor-issue:
+    needs: vuln-min-go
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {path: cexy-go, persist-credentials: false, sparse-checkout: go.mod, sparse-checkout-cone-mode: false}
+      - name: Fetch the govulncheck output
+        continue-on-error: true # absent when vuln-min-go failed before govulncheck ran
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: govulncheck-min-go
+          path: ${{ runner.temp }}/govulncheck
+      - name: Open or update the security-floor issue
+        working-directory: cexy-go
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -137,7 +164,7 @@ jobs:
             echo "Run: $RUN_URL"
             echo
             echo '```'
-            tail -n 60 "$RUNNER_TEMP/govulncheck.txt" 2>/dev/null || echo "(no govulncheck output: the job failed earlier)"
+            tail -n 60 "$RUNNER_TEMP/govulncheck/govulncheck.txt" 2>/dev/null || echo "(no govulncheck output: the job failed earlier)"
             echo '```'
           } > "$RUNNER_TEMP/issue.md"
           gh label create security-floor --color B60205 --description "Minimum Go has known stdlib vulnerabilities" 2>/dev/null || true
