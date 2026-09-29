@@ -142,6 +142,10 @@ func TestSubAccountBalances404VariantsAreNotFoundWithoutRetry(t *testing.T) {
 			if !errors.Is(err, ErrNotFound) {
 				t.Fatalf("err = %v, want ErrNotFound", err)
 			}
+			var ae *APIError
+			if name != "retryable true" && (!errors.As(err, &ae) || ae.Retryable) {
+				t.Fatalf("err = %#v, want Retryable false", err)
+			}
 			if rec.count() != 1 {
 				t.Fatalf("requests = %d, want exactly 1 (no retry)", rec.count())
 			}

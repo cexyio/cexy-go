@@ -134,7 +134,7 @@ var statusKinds = map[int]error{
 	451: ErrJurisdictionBlocked,
 }
 
-var defaultRetryableStatus = map[int]bool{408: true, 429: true, 500: true, 502: true, 503: true, 504: true}
+var defaultRetryableStatus = map[int]bool{429: true, 500: true, 502: true, 503: true, 504: true}
 
 type envelope struct {
 	Error *struct {
