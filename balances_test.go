@@ -122,14 +122,43 @@ func TestSubAccountBalances404IsNotFoundWithoutRetry(t *testing.T) {
 	}
 }
 
+func TestSubAccountBalances404VariantsAreNotFoundWithoutRetry(t *testing.T) {
+	for name, handler := range map[string]http.HandlerFunc{
+		"no retryable field": func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, 404, map[string]any{"error": map[string]any{"code": "NOT_FOUND", "message": "no such sub-account"}})
+		},
+		"non-JSON body": func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte("<html>not found</html>"))
+		},
+		"retryable true": func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, 404, apiErr("NOT_FOUND", "no such sub-account", true))
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, rec, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret}, handler)
+			_, err := c.Account.SubAccountBalances(context.Background(), "other")
+			if !errors.Is(err, ErrNotFound) {
+				t.Fatalf("err = %v, want ErrNotFound", err)
+			}
+			if rec.count() != 1 {
+				t.Fatalf("requests = %d, want exactly 1 (no retry)", rec.count())
+			}
+		})
+	}
+}
+
 func TestSubAccountBalancesEmptyIDRejectedBeforeRequest(t *testing.T) {
 	c, rec, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret}, func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"data": []any{}})
 	})
-	_, err := c.Account.SubAccountBalances(context.Background(), "")
-	var ce *ConfigError
-	if !errors.As(err, &ce) {
-		t.Fatalf("err = %v, want *ConfigError", err)
+	for _, id := range []string{"", ".", ".."} {
+		_, err := c.Account.SubAccountBalances(context.Background(), id)
+		var ce *ConfigError
+		if !errors.As(err, &ce) {
+			t.Fatalf("%q: err = %v, want *ConfigError", id, err)
+		}
 	}
 	if rec.count() != 0 {
 		t.Fatalf("requests = %d, want 0", rec.count())

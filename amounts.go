@@ -63,4 +63,8 @@ func Levels(raw [][]Amount) []BookLevel {
 	return out
 }
 
-func validPathValue(v string) bool { return v != "" && !strings.ContainsAny(v, "\r\n") }
+// validPathValue: non-empty, no CR/LF, and not "." or "..": a dot segment would be resolved by
+// the URL layer, a proxy or the server's router (even as %2E) and reach a different route.
+func validPathValue(v string) bool {
+	return v != "" && v != "." && v != ".." && !strings.ContainsAny(v, "\r\n")
+}
