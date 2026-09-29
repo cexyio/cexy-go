@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### CI
+- New `vuln-min-go` job (also weekly): runs govulncheck with the minimum Go that `go.mod` allows, so
+  a stale security floor is caught when a new standard-library advisory appears.
+
 ### Added
 - `Balance.HeldIncoming` (`[]HeldIncoming`: `TransferID`, `Amount`, `AvailableAt`): incoming internal
   transfers still held, at most 100, soonest first. Their sum is already included in `Locked`: never
