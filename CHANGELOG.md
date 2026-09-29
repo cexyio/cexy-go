@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-dev.5] (2026-09-29)
+
 ### CI
 - New `vuln-min-go` job (also weekly): runs govulncheck with the minimum Go that `go.mod` allows, so
   a stale security floor is caught when a new standard-library advisory appears.
@@ -14,6 +16,10 @@ All notable changes to this project are documented here. The format follows
 - `Balance.HeldIncoming` (`[]HeldIncoming`: `TransferID`, `Amount`, `AvailableAt`): incoming internal
   transfers still held, at most 100, soonest first. Their sum is already included in `Locked`: never
   add it again. `Balances`/`Balance` never return a nil slice (empty when the server omits it).
+- `Account.SubAccountBalances(ctx, id)`: a sub-account's balances, read by its parent account
+  (`GET /account/sub-accounts/{id}/balances`, read scope). Same `[]Balance` as `Balances`, including
+  `HeldIncoming`. An id that is not the caller's sub-account matches `ErrNotFound` (not retried); an
+  empty id is a `*ConfigError` before any request.
 
 ## [0.1.0-dev.4] (2026-09-28)
 

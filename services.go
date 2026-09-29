@@ -190,6 +190,20 @@ func (s *AccountService) SubAccounts(ctx context.Context, opts ...CallOption) ([
 	return getData[[]SubAccount](ctx, s.t, call{op: OpListSubAccounts}, opts)
 }
 
+// SubAccountBalances returns a sub-account's balances, read by its PARENT account: the same
+// shape as Balances (zero balances omitted, sorted by asset), including HeldIncoming, whose sum
+// is already inside Locked; HeldIncoming is never nil. An id that is not one of the caller's
+// sub-accounts (or a call made with the sub-account's own key) returns an *APIError matching
+// ErrNotFound, and it is not retried; a sub-account's own key reads its balances with Balances.
+// id must be non-empty (a *ConfigError before any request); it is sent as one URL path segment.
+func (s *AccountService) SubAccountBalances(ctx context.Context, id string, opts ...CallOption) ([]Balance, error) {
+	bs, err := getData[[]Balance](ctx, s.t, call{op: OpSubAccountBalances, pathParams: map[string]string{"id": id}}, opts)
+	for i := range bs {
+		bs[i].HeldIncoming = nonNilHeld(bs[i].HeldIncoming)
+	}
+	return bs, err
+}
+
 // APIKeys returns your API keys (metadata only; secrets are never returned).
 func (s *AccountService) APIKeys(ctx context.Context, opts ...CallOption) ([]APIKey, error) {
 	return getData[[]APIKey](ctx, s.t, call{op: OpListAPIKeys}, opts)

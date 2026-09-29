@@ -14,7 +14,7 @@ The official Go SDK for the [CEXY.io](https://cexy.io) REST and WebSocket API.
 ## Install
 
 ```bash
-go get github.com/cexyio/cexy-go@v0.1.0-dev.4
+go get github.com/cexyio/cexy-go@v0.1.0-dev.5
 ```
 
 ```go
@@ -49,6 +49,8 @@ c, err := cexy.New(cexy.Options{
 })
 
 balances, err := c.Account.Balances(ctx)
+// A sub-account's balances (parent account only; same shape, incl. HeldIncoming):
+subBalances, err := c.Account.SubAccountBalances(ctx, "sub-account-id")
 open, err := c.Trading.OpenOrders(ctx, &cexy.ListOpenOrdersParams{Symbol: cexy.Ptr("BTC/USDT")})
 
 placed, err := c.Trading.PlaceOrder(ctx, cexy.PlaceOrderRequest{
@@ -93,7 +95,7 @@ Give both `APIKey` and `APISecret`, or neither: `New` returns a `*ConfigError` f
 | `Markets` | `List`, `Get`, `OrderBook`, `Trades`, `AllTrades`, `Candles` | public |
 | `Assets`, `Networks`, `Fees`, `Pools` | `List`, `Get` / `List` / `List` / `List`, `Get` | public |
 | `Time`, `Config` (on `Client`) | | public |
-| `Account` | `Balances`, `Balance`, `Ledger`, `Notifications`, `SubAccounts`, `APIKeys` (+ `All…` iterators) | read |
+| `Account` | `Balances`, `Balance`, `Ledger`, `Notifications`, `SubAccounts`, `SubAccountBalances`, `APIKeys` (+ `All…` iterators) | read |
 | `Exports` | `Deposits`, `Ledger`, `Orders`, `Trades`, `Withdrawals` (CSV text) | read |
 | `Wallet` | `Deposits`, `Deposit`, `Withdrawals`, `Withdrawal`, `WithdrawalAddresses`, `DepositAddress` (+ iterators) | read |
 | `Trading` | `OpenOrders`, `Order`, `OrderByClientID`, `OrderHistory`, `Trades` (+ iterators) | read |

@@ -2,6 +2,7 @@ package cexy
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -65,5 +66,72 @@ func TestBalanceHeldIncomingEmptyAndMissing(t *testing.T) {
 				t.Fatalf("Balance held = %#v, want non-nil empty", b.HeldIncoming)
 			}
 		})
+	}
+}
+
+func TestSubAccountBalancesPathAuthAndHeld(t *testing.T) {
+	held := []map[string]any{{"transfer_id": "cccccccccccccccccccccccc", "amount": "1.50", "available_at": "2026-09-30T10:00:00.001Z"}}
+	c, rec, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret}, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"data": []any{balanceRow(held)}})
+	})
+	bs, err := c.Account.SubAccountBalances(context.Background(), "sub/1 ?x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.count() != 1 {
+		t.Fatalf("requests = %d", rec.count())
+	}
+	req, _ := rec.get(0)
+	if req.Method != http.MethodGet || req.URL.EscapedPath() != "/api/v1/account/sub-accounts/sub%2F1%20%3Fx/balances" {
+		t.Fatalf("request = %s %s", req.Method, req.URL.EscapedPath())
+	}
+	if req.Header.Get("X-API-Key") != testKey || req.Header.Get("X-API-Secret") == "" {
+		t.Fatal("credentials not sent")
+	}
+	if req.Header.Get("Idempotency-Key") != "" {
+		t.Fatal("unexpected Idempotency-Key")
+	}
+	if len(bs) != 1 || len(bs[0].HeldIncoming) != 1 || bs[0].HeldIncoming[0].Amount != "1.50" {
+		t.Fatalf("balances = %+v", bs)
+	}
+}
+
+func TestSubAccountBalancesMissingHeldIsEmpty(t *testing.T) {
+	c, _, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret}, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"data": []any{balanceRow(nil)}})
+	})
+	bs, err := c.Account.SubAccountBalances(context.Background(), "sub_1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bs[0].HeldIncoming == nil || len(bs[0].HeldIncoming) != 0 {
+		t.Fatalf("held = %#v, want empty non-nil", bs[0].HeldIncoming)
+	}
+}
+
+func TestSubAccountBalances404IsNotFoundWithoutRetry(t *testing.T) {
+	c, rec, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret}, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 404, apiErr("NOT_FOUND", "no such sub-account", false))
+	})
+	_, err := c.Account.SubAccountBalances(context.Background(), "other")
+	if !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+	if rec.count() != 1 {
+		t.Fatalf("requests = %d, want exactly 1 (no retry)", rec.count())
+	}
+}
+
+func TestSubAccountBalancesEmptyIDRejectedBeforeRequest(t *testing.T) {
+	c, rec, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret}, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"data": []any{}})
+	})
+	_, err := c.Account.SubAccountBalances(context.Background(), "")
+	var ce *ConfigError
+	if !errors.As(err, &ce) {
+		t.Fatalf("err = %v, want *ConfigError", err)
+	}
+	if rec.count() != 0 {
+		t.Fatalf("requests = %d, want 0", rec.count())
 	}
 }
