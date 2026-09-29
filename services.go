@@ -127,13 +127,32 @@ func (s *PoolsService) Exit(ctx context.Context, symbol string, req ExitPoolRequ
 type AccountService struct{ t *transport }
 
 // Balances returns every balance.
+//
+// Balance.HeldIncoming lists incoming internal transfers still held. Their sum is ALREADY
+// INCLUDED in Locked: never add them to Locked or Total again. At most 100 entries, soonest
+// AvailableAt first (millisecond precision), with no sender identity. An entry disappears once
+// the transfer is released (its amount moves to Available) or cancelled by the exchange.
+// HeldIncoming is never nil: a server that omits the field decodes as an empty slice.
 func (s *AccountService) Balances(ctx context.Context, opts ...CallOption) ([]Balance, error) {
-	return getData[[]Balance](ctx, s.t, call{op: OpListBalances}, opts)
+	bs, err := getData[[]Balance](ctx, s.t, call{op: OpListBalances}, opts)
+	for i := range bs {
+		bs[i].HeldIncoming = nonNilHeld(bs[i].HeldIncoming)
+	}
+	return bs, err
 }
 
-// Balance returns the balance of one asset.
+// Balance returns the balance of one asset. See Balances for HeldIncoming.
 func (s *AccountService) Balance(ctx context.Context, asset string, opts ...CallOption) (Balance, error) {
-	return getData[Balance](ctx, s.t, call{op: OpGetBalance, pathParams: map[string]string{"asset": asset}}, opts)
+	b, err := getData[Balance](ctx, s.t, call{op: OpGetBalance, pathParams: map[string]string{"asset": asset}}, opts)
+	b.HeldIncoming = nonNilHeld(b.HeldIncoming)
+	return b, err
+}
+
+func nonNilHeld(h []HeldIncoming) []HeldIncoming {
+	if h == nil {
+		return []HeldIncoming{}
+	}
+	return h
 }
 
 // Ledger returns one page of ledger entries.

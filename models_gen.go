@@ -122,9 +122,11 @@ type Balance struct {
 	// Asset symbol.
 	Asset     string `json:"asset"`
 	Available Amount `json:"available"`
-	Locked    Amount `json:"locked"`
-	Pending   Amount `json:"pending"`
-	Total     Amount `json:"total"`
+	// Internal transfers to this account still held, soonest released first; empty when none. Their sum is part of `locked`. Shows at most 100.
+	HeldIncoming []HeldIncoming `json:"held_incoming"`
+	Locked       Amount         `json:"locked"`
+	Pending      Amount         `json:"pending"`
+	Total        Amount         `json:"total"`
 }
 
 // CancelAllRequest: Cancels every open order, optionally within one market.
@@ -345,6 +347,15 @@ type Fill struct {
 //
 // An alias of string: its format is not checked, so a future format keeps working.
 type FuturesTransferID = string
+
+// HeldIncoming: An internal transfer credited to `locked` and not yet available.
+type HeldIncoming struct {
+	Amount Amount `json:"amount"`
+	// When it becomes available, unless an operator cancels it before then.
+	AvailableAt time.Time `json:"available_at"`
+	// The transfer.
+	TransferID string `json:"transfer_id"`
+}
 
 // JoinPoolRequest: Adds liquidity to a pool.
 type JoinPoolRequest struct {

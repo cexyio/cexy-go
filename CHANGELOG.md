@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `Balance.HeldIncoming` (`[]HeldIncoming`: `TransferID`, `Amount`, `AvailableAt`): incoming internal
+  transfers still held, at most 100, soonest first. Their sum is already included in `Locked`: never
+  add it again. `Balances`/`Balance` never return a nil slice (empty when the server omits it).
+
 ## [0.1.0-dev.4] (2026-09-28)
 
 Sync with API release H-1.
