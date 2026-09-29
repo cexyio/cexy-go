@@ -2,6 +2,10 @@ name: ci
 on:
   push: {branches: [main]}
   pull_request:
+  # Weekly, so a newly published Go standard-library vulnerability in the minimum supported
+  # toolchain shows up even when nothing is merged (see the vuln-min-go job).
+  schedule:
+    - cron: "23 6 * * 1"
 permissions:
   contents: read
 
@@ -85,3 +89,28 @@ jobs:
         run: go build ./...
       - name: Run (offline smoke; no live call in CI)
         run: go run .
+
+  # govulncheck with the MINIMUM Go that go.mod allows (its `go` directive), not the newest: users
+  # may build with that version, so its standard library must be free of known vulnerabilities
+  # the SDK reaches. A failure means the floor is stale: raise the `go` directive to the fixed
+  # patch release. Not a required check, so a newly published advisory does not block unrelated
+  # PRs; the weekly schedule surfaces it.
+  vuln-min-go:
+    runs-on: ubuntu-latest
+    defaults:
+      run: {working-directory: cexy-go}
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {path: cexy-go, persist-credentials: false}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with: {go-version-file: cexy-go/go.mod, cache-dependency-path: cexy-go/go.sum}
+      - name: Go version is the go.mod minimum
+        run: |
+          want="go$(awk '$1 == "go" {print $2; exit}' go.mod)"
+          have="$(go env GOVERSION)"
+          echo "go.mod minimum: $want; toolchain: $have"
+          test "$have" = "$want"
+      - name: Known vulnerabilities at the minimum Go (govulncheck, pinned)
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
