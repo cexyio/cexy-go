@@ -97,6 +97,9 @@ jobs:
   # PRs; the weekly schedule surfaces it.
   vuln-min-go:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write # only for the failure step below, on the weekly schedule
     defaults:
       run: {working-directory: cexy-go}
     env:
@@ -113,4 +116,36 @@ jobs:
           echo "go.mod minimum: $want; toolchain: $have"
           test "$have" = "$want"
       - name: Known vulnerabilities at the minimum Go (govulncheck, pinned)
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+        run: |
+          set -o pipefail
+          go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./... | tee "$RUNNER_TEMP/govulncheck.txt"
+      # A red scheduled run only emails whoever last edited the schedule, so on the weekly run a
+      # failure opens (or updates) one issue labelled security-floor, visible in the repository.
+      - name: Open or update the security-floor issue (weekly run only)
+        if: failure() && github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          floor="$(awk '$1 == "go" {print $2; exit}' go.mod)"
+          {
+            echo "govulncheck reports known vulnerabilities for the minimum Go that go.mod allows (go $floor)."
+            echo "Users may build the SDK with that toolchain. Raise the \`go\` directive in go.mod (and ci/consumer/go.mod)"
+            echo "to the patch release that fixes them, note it in the CHANGELOG under Security, and release."
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            echo '```'
+            tail -n 60 "$RUNNER_TEMP/govulncheck.txt" 2>/dev/null || echo "(no govulncheck output: the job failed earlier)"
+            echo '```'
+          } > "$RUNNER_TEMP/issue.md"
+          gh label create security-floor --color B60205 --description "Minimum Go has known stdlib vulnerabilities" 2>/dev/null || true
+          existing=$(gh issue list --label security-floor --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file "$RUNNER_TEMP/issue.md"
+            gh issue comment "$existing" --body "Still failing as of $(date -u +%Y-%m-%d): $RUN_URL"
+          else
+            gh issue create --title "Minimum Go (go $floor) has known vulnerabilities: raise the floor" \
+              --label security-floor --body-file "$RUNNER_TEMP/issue.md"
+          fi
