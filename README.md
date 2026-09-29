@@ -105,6 +105,15 @@ calls return the same one). Always use the memo too when one is returned.
 
 There are no withdrawal or transfer methods: API keys cannot withdraw or transfer funds.
 
+## Held incoming transfers
+
+`Balance.HeldIncoming` lists incoming internal transfers still held, each with `TransferID`,
+`Amount` and `AvailableAt`. Their sum is **already included in `Locked`**, so never add it to
+`Locked` or `Total` again. There are at most 100 entries, soonest `AvailableAt` first
+(millisecond precision), with no sender identity. An entry disappears once the transfer is
+released (the amount moves to `Available`) or cancelled by the exchange. It is never nil: an
+empty slice when none, including from servers that predate the field.
+
 ## Amounts
 
 Every amount is an exact decimal string (`cexy.Amount("0.00150000")`), in responses and requests.
