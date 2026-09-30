@@ -594,3 +594,70 @@ func TestLiveBalancesReviewFixes(t *testing.T) {
 		})
 	})
 }
+
+func TestLiveBalancesFollowUps(t *testing.T) {
+	t.Run("owner-lookup events dropped on mismatch", func(t *testing.T) {
+		ws, m := setupWS(t, WSOptions{})
+		ctx := context.Background()
+		if _, err := ws.Connect(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ws.Auth(ctx, "good"); err != nil {
+			t.Fatal(err)
+		}
+		answer := make(chan string)
+		lb, err := ws.LiveBalances(ctx, LiveBalancesOptions{
+			OwnerID:  func(context.Context) (string, error) { return <-answer, nil },
+			Snapshot: func(context.Context) ([]Balance, error) { return nil, nil },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lb.Close()
+		for i := 0; i < 5; i++ {
+			m.push(map[string]any{"type": "balance.updated", "channel": "balances",
+				"data": map[string]any{"asset": "USDT", "available": "1", "locked": "0", "pending": "0", "total": "1", "sequence": i + 1}})
+		}
+		buffered := func() int { lb.mu.Lock(); defer lb.mu.Unlock(); return len(lb.buffer) }
+		eventually(t, "5 buffered during the lookup", func() bool { return buffered() == 5 })
+		answer <- "someone_else"
+		eventually(t, "mismatch", func() bool { return lb.LastError() != nil })
+		if n := buffered(); n != 0 {
+			t.Fatalf("%d events kept after the mismatch", n)
+		}
+	})
+	t.Run("LiveBalances.Close cancels the fetch in flight", func(t *testing.T) {
+		ws, _ := setupWS(t, WSOptions{})
+		ctx := context.Background()
+		if _, err := ws.Connect(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ws.Auth(ctx, "good"); err != nil {
+			t.Fatal(err)
+		}
+		started := make(chan struct{})
+		canceled := make(chan error, 1)
+		lb, err := ws.LiveBalances(ctx, LiveBalancesOptions{
+			AccountID: "u1",
+			Snapshot: func(fctx context.Context) ([]Balance, error) {
+				close(started)
+				<-fctx.Done()
+				canceled <- fctx.Err()
+				return nil, fctx.Err()
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		<-started
+		lb.Close()
+		select {
+		case err := <-canceled:
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("fetch ended with %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("Close did not cancel the fetch")
+		}
+	})
+}
