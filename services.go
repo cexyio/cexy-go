@@ -134,6 +134,18 @@ type AccountService struct{ t *transport }
 // the transfer is released (its amount moves to Available) or cancelled by the exchange.
 // HeldIncoming is never nil: a server that omits the field decodes as an empty slice.
 func (s *AccountService) Balances(ctx context.Context, opts ...CallOption) ([]Balance, error) {
+	return s.balances(ctx, opts)
+}
+
+// ID returns the id of the account this API key belongs to (the same hex as the WebSocket's
+// authenticated user id). WebSocket.LiveBalances uses it to check that REST snapshots and
+// WebSocket events belong to the same account.
+func (s *AccountService) ID(ctx context.Context, opts ...CallOption) (string, error) {
+	r, err := getData[AccountId](ctx, s.t, call{op: OpGetAccountID}, opts)
+	return r.UserID, err
+}
+
+func (s *AccountService) balances(ctx context.Context, opts []CallOption) ([]Balance, error) {
 	bs, err := getData[[]Balance](ctx, s.t, call{op: OpListBalances}, opts)
 	for i := range bs {
 		bs[i].HeldIncoming = nonNilHeld(bs[i].HeldIncoming)

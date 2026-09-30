@@ -91,6 +91,7 @@ func TestAuthConformance(t *testing.T) {
 	ctx := context.Background()
 	run := map[string]func() error{
 		"GET /api/v1/account/balances": func() error { _, err := c.Account.Balances(ctx); return err },
+		"GET /api/v1/account/id":       func() error { _, err := c.Account.ID(ctx); return err },
 		"GET /api/v1/markets":          func() error { _, err := c.Markets.List(ctx); return err },
 		"GET /api/v1/time":             func() error { _, err := c.Time(ctx); return err },
 	}
@@ -266,8 +267,8 @@ func TestOperationsMatchSpec(t *testing.T) {
 			}
 		}
 	}
-	if seen != len(operations) || seen != 41 {
-		t.Fatalf("spec has %d operations, table %d (want 41)", seen, len(operations))
+	if seen != len(operations) || seen != 42 {
+		t.Fatalf("spec has %d operations, table %d (want 42)", seen, len(operations))
 	}
 }
 

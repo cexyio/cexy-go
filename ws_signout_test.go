@@ -120,12 +120,22 @@ func TestWSPrivateSignoutConformance(t *testing.T) {
 			Steps []signoutStep `json:"steps"`
 		} `json:"cases"`
 	}
-	readJSON(t, filepath.Join(dir, "conformance", "ws", "private_signout.json"), &spec)
-	if len(spec.Cases) == 0 {
-		t.Fatal("no cases")
+	for _, file := range []string{"private_signout.json", "server_signout.json"} {
+		spec.Cases = nil
+		readJSON(t, filepath.Join(dir, "conformance", "ws", file), &spec)
+		if len(spec.Cases) == 0 {
+			t.Fatalf("%s: no cases", file)
+		}
+		runSignoutCases(t, file, spec.Cases)
 	}
-	for _, c := range spec.Cases {
-		t.Run(c.ID, func(t *testing.T) {
+}
+
+func runSignoutCases(t *testing.T, file string, cases []struct {
+	ID    string        `json:"id"`
+	Steps []signoutStep `json:"steps"`
+}) {
+	for _, c := range cases {
+		t.Run(file+"/"+c.ID, func(t *testing.T) {
 			s := &scriptedWS{}
 			srv := httptest.NewServer(http.HandlerFunc(s.handler))
 			defer srv.Close()

@@ -7,6 +7,12 @@ import (
 	"time"
 )
 
+// AccountId: The id of the account a credential belongs to, and nothing else.
+type AccountId struct {
+	// Account id: the same hex as the realtime `authenticated` reply's `user_id`.
+	UserID string `json:"user_id"`
+}
+
 // APIKey: An existing key. Never carries the secret.
 type APIKey struct {
 	// Permitted source addresses. Empty means unrestricted.
@@ -126,7 +132,9 @@ type Balance struct {
 	HeldIncoming []HeldIncoming `json:"held_incoming"`
 	Locked       Amount         `json:"locked"`
 	Pending      Amount         `json:"pending"`
-	Total        Amount         `json:"total"`
+	// This balance's sequence: it rises with every change to it, and `balance.updated` carries the same number as `data.sequence`. Apply an event only if its sequence is greater than the one this snapshot holds. 0 for a balance never touched.
+	Sequence int64  `json:"sequence"`
+	Total    Amount `json:"total"`
 }
 
 // CancelAllRequest: Cancels every open order, optionally within one market.
