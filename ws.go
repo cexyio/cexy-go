@@ -330,9 +330,10 @@ type WebSocket struct {
 	welcome        *Welcome
 	channels       []string
 	token          string
-	authUserID     string // user of the last successful auth on the current connection
-	challenge      string // latest unused auth_key challenge (welcome or the last auth_key reply)
-	keyAuth        bool   // AuthKey is the active credential (re-signed after reconnects)
+	authUserID     string          // user of the last successful auth on the current connection
+	challenge      string          // latest unused auth_key challenge (welcome or the last auth_key reply)
+	keyAuth        bool            // AuthKey is the active credential (re-signed after reconnects)
+	authKeyIDs     map[string]bool // auth_key request ids sent on the current connection
 	seq            map[string]*seqState
 	liveBalances   []*LiveBalances
 	balancesByUs   bool     // balances was subscribed by LiveBalances
@@ -563,6 +564,7 @@ func (w *WebSocket) onWelcome(welcome Welcome) {
 	w.authUserID = ""    // a new connection starts signed out
 	w.resetSeqLocked("") // sequences on a new connection are unrelated
 	w.challenge = welcome.Challenge
+	w.authKeyIDs = map[string]bool{}
 	token := w.token
 	keyAuth := w.keyAuth
 	channels := append([]string(nil), w.channels...)
@@ -652,15 +654,24 @@ func (w *WebSocket) authKey(ctx context.Context) (AuthResult, error) {
 	w.mu.Lock()
 	challenge := w.challenge
 	w.challenge = "" // a challenge is signed at most once
+	welcome := w.welcome
 	connID := ""
-	if w.welcome != nil {
-		connID = w.welcome.ConnectionID
+	if welcome != nil {
+		connID = welcome.ConnectionID
 	}
 	w.mu.Unlock()
 	if challenge == "" || connID == "" || w.opts.KeySigner == nil {
 		return AuthResult{}, &WSError{Code: "NO_CHALLENGE", Message: "AuthKey: the server has not issued a challenge on this connection"}
 	}
 	keyID, sig := w.opts.KeySigner.SignWebSocketChallenge(connID, challenge)
+	// A custom signer may be slow (a KMS or HSM): if the connection changed meanwhile, the
+	// signature is for the old one. Drop it; the new connection signs its own challenge.
+	w.mu.Lock()
+	stale := w.welcome != welcome
+	w.mu.Unlock()
+	if stale {
+		return AuthResult{}, &WSError{Code: "STALE_CHALLENGE", Message: "AuthKey: the connection changed while signing; the new connection authenticates itself"}
+	}
 	ack, err := w.request(ctx, "auth_key", map[string]any{"key_id": keyID, "signature": sig}, nil, true)
 	if err != nil {
 		return AuthResult{}, err
@@ -1022,8 +1033,9 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 			// subscribe is only a refused subscribe).
 			w.mu.Lock()
 			p, ok := w.pending[id]
-			isAuth := ok && (p.kind == "auth" || p.kind == "auth_key")
-			if ok && p.kind == "auth_key" {
+			late := !ok && w.authKeyIDs[id] // a refusal that arrived after the timeout
+			isAuth := late || (ok && (p.kind == "auth" || p.kind == "auth_key"))
+			if late || (ok && p.kind == "auth_key") {
 				w.keyAuth = false // a refused key is not tried again automatically
 			}
 			w.mu.Unlock()
@@ -1336,6 +1348,9 @@ func (w *WebSocket) request(ctx context.Context, kind string, payload map[string
 	w.nextID++
 	p := &wsPending{kind: kind, channels: channels, done: make(chan wsAck, 1)}
 	w.pending[id] = p
+	if kind == "auth_key" && w.authKeyIDs != nil {
+		w.authKeyIDs[id] = true
+	}
 	w.mu.Unlock()
 
 	payload["op"] = kind

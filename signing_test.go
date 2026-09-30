@@ -2,6 +2,8 @@ package cexy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -142,6 +146,85 @@ const (
 	sigTestSecret = "test_secret_for_signing"
 )
 
+// An independent canonicaliser, written from the spec text (not the SDK's code): regexp decoding
+// and a table encoder, so the recording server catches canonicalisation bugs too.
+var pctRE = regexp.MustCompile(`%[0-9A-Fa-f]{2}`)
+
+func indepEnc(s string) string {
+	raw := pctRE.ReplaceAllFunc([]byte(s), func(m []byte) []byte {
+		b, _ := strconv.ParseUint(string(m[1:]), 16, 8)
+		return []byte{byte(b)}
+	})
+	const unreserved = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+	var sb strings.Builder
+	for _, b := range raw {
+		if strings.IndexByte(unreserved, b) >= 0 {
+			sb.WriteByte(b)
+		} else {
+			fmt.Fprintf(&sb, "%%%02X", b)
+		}
+	}
+	return sb.String()
+}
+
+func indepPath(p string) string {
+	segs := strings.Split(p, "/")
+	for i := range segs {
+		segs[i] = indepEnc(segs[i])
+	}
+	return strings.Join(segs, "/")
+}
+
+func indepQuery(q string) string {
+	var pairs [][2]string
+	for _, part := range strings.Split(q, "&") {
+		if part == "" {
+			continue
+		}
+		n, v, _ := strings.Cut(part, "=")
+		pairs = append(pairs, [2]string{indepEnc(n), indepEnc(v)})
+	}
+	slices.SortFunc(pairs, func(a, b [2]string) int {
+		if c := strings.Compare(a[0], b[0]); c != 0 {
+			return c
+		}
+		return strings.Compare(a[1], b[1])
+	})
+	out := make([]string, len(pairs))
+	for i, p := range pairs {
+		out[i] = p[0] + "=" + p[1]
+	}
+	return strings.Join(out, "&")
+}
+
+func indepCanonical(method, target, ts, nonce string, body []byte) string {
+	path, query := splitTarget(target)
+	sum := sha256.Sum256(body)
+	return strings.Join([]string{"CEXY-HMAC-SHA256-v1", method, indepPath(path), indepQuery(query), ts, nonce, hex.EncodeToString(sum[:])}, "\n")
+}
+
+func TestIndependentCanonicaliserAgreesWithVectors(t *testing.T) {
+	v := loadSigningVectors(t)
+	for _, c := range v.Rest {
+		path, query := splitTarget(c.RequestTarget)
+		if indepPath(path) != c.CanonicalPath || indepQuery(query) != c.CanonicalQuery {
+			t.Errorf("%s: independent canonicaliser disagrees with the vector", c.Name)
+		}
+		if got := indepCanonical(c.Method, c.RequestTarget, v.Timestamp, v.Nonce, []byte(c.Body)); got != c.CanonicalRequest {
+			t.Errorf("%s: %q", c.Name, got)
+		}
+	}
+}
+
+func TestQueryRules(t *testing.T) {
+	if got := canonicalQuery("a=1&&b=2&"); got != "a=1&b=2" {
+		t.Errorf("empty parts: %q", got)
+	}
+	if got := canonicalQuery("?a=1"); got != "%3Fa=1" {
+		t.Errorf("a '?' inside the query is data: %q", got)
+	}
+}
+
 // signedRequest is what the recording server saw, checked against the RAW request line and body.
 type signedRequest struct {
 	requestURI string
@@ -161,8 +244,7 @@ type signingServer struct {
 
 func (s *signingServer) record(r *http.Request) signedRequest {
 	body, _ := io.ReadAll(r.Body)
-	path, query := splitTarget(r.RequestURI)
-	canonical := canonicalRequest(r.Method, path, query, r.Header.Get("X-API-Timestamp"), r.Header.Get("X-API-Nonce"), body)
+	canonical := indepCanonical(r.Method, r.RequestURI, r.Header.Get("X-API-Timestamp"), r.Header.Get("X-API-Nonce"), body)
 	ts, _ := strconv.ParseInt(r.Header.Get("X-API-Timestamp"), 10, 64)
 	sr := signedRequest{requestURI: r.RequestURI, body: string(body), headers: r.Header.Clone(), nonce: r.Header.Get("X-API-Nonce"), timestamp: ts,
 		valid: r.Header.Get("X-API-Key") == sigTestKey && r.Header.Get("X-API-Signature") == hmacHex(sigTestSecret, canonical)}
@@ -406,7 +488,8 @@ type keyAuthWS struct {
 	signed   map[string]bool // challenges signed so far
 	issued   int
 	refuse   atomic.Bool // answer auth_key with an error
-	silent   atomic.Bool // no reply to auth_key
+	silent   atomic.Bool // hold the reply to auth_key (see release)
+	held     []byte
 }
 
 func (k *keyAuthWS) nextChallenge() string {
@@ -450,14 +533,18 @@ func (k *keyAuthWS) handler(w http.ResponseWriter, r *http.Request) {
 			k.signed[challenge] = true
 			challenge = k.nextChallenge()
 			k.mu.Unlock()
+			reply := map[string]any{"type": "authenticated", "user_id": "u1", "auth": "api_key", "challenge": challenge, "id": f["id"]}
+			if !ok {
+				reply = map[string]any{"type": "error", "code": "UNAUTHENTICATED", "message": "bad key signature", "challenge": challenge, "id": f["id"]}
+			}
 			if k.silent.Load() {
+				b, _ := json.Marshal(reply)
+				k.mu.Lock()
+				k.held = b
+				k.mu.Unlock()
 				continue
 			}
-			if ok {
-				write(map[string]any{"type": "authenticated", "user_id": "u1", "auth": "api_key", "challenge": challenge, "id": f["id"]})
-			} else {
-				write(map[string]any{"type": "error", "code": "UNAUTHENTICATED", "message": "bad key signature", "challenge": challenge, "id": f["id"]})
-			}
+			write(reply)
 		case "subscribe":
 			write(map[string]any{"type": "subscribed", "channels": f["channels"], "id": f["id"]})
 		case "ping":
@@ -466,6 +553,24 @@ func (k *keyAuthWS) handler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+}
+
+// release sends the held auth_key reply late, on the latest connection.
+func (k *keyAuthWS) release() {
+	k.mu.Lock()
+	c, b := k.conns[len(k.conns)-1], k.held
+	k.held = nil
+	k.mu.Unlock()
+	_ = c.Write(context.Background(), websocket.MessageText, b)
+}
+
+// pushLast sends a frame on the latest connection.
+func (k *keyAuthWS) pushLast(v any) {
+	k.mu.Lock()
+	c := k.conns[len(k.conns)-1]
+	k.mu.Unlock()
+	b, _ := json.Marshal(v)
+	_ = c.Write(context.Background(), websocket.MessageText, b)
 }
 
 func (k *keyAuthWS) sent() []map[string]any {
@@ -583,23 +688,119 @@ func TestWSRefusedAuthKeyStopsReauth(t *testing.T) {
 }
 
 func TestWSAuthKeyLateReplyRacingReconnect(t *testing.T) {
-	ws, k := setupKeyAuthWS(t, "hmac", WSOptions{AckTimeout: 300 * time.Millisecond})
+	ws, k := setupKeyAuthWS(t, "hmac", WSOptions{AckTimeout: 100 * time.Millisecond})
 	ctx := context.Background()
 	if _, err := ws.Connect(ctx); err != nil {
 		t.Fatal(err)
 	}
-	k.silent.Store(true) // the reply never comes on this connection
-	done := make(chan error, 1)
-	go func() { _, err := ws.AuthKey(ctx); done <- err }()
-	eventually(t, "auth_key sent", func() bool { return len(k.sent()) == 1 })
+	k.silent.Store(true) // the reply is held back
+	if _, err := ws.AuthKey(ctx); err == nil {
+		t.Fatal("expected a timeout")
+	}
 	k.silent.Store(false)
-	k.drop()
+	k.release() // the late reply (with its next challenge) arrives ...
+	k.drop()    // ... as the connection drops
 	eventually(t, "re-auth on the new connection", func() bool { return k.connCount() == 2 && len(k.sent()) == 2 })
-	<-done
-	eventually(t, "authenticated", func() bool { return ws.UserID() == "u1" })
+	eventually(t, "authenticated with the new welcome's challenge", func() bool { return ws.UserID() == "u1" })
 	s := k.sent()
 	if s[0]["signature"] == s[1]["signature"] {
 		t.Fatal("the old challenge was signed again")
+	}
+}
+
+func TestWSAuthKeyChallengeIsConsumed(t *testing.T) {
+	ws, k := setupKeyAuthWS(t, "hmac", WSOptions{AckTimeout: 100 * time.Millisecond})
+	ctx := context.Background()
+	if _, err := ws.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	k.silent.Store(true)
+	var we *WSError
+	if _, err := ws.AuthKey(ctx); !errors.As(err, &we) || we.Code != "TIMEOUT" {
+		t.Fatalf("got %v", err)
+	}
+	if _, err := ws.AuthKey(ctx); !errors.As(err, &we) || we.Code != "NO_CHALLENGE" {
+		t.Fatalf("got %v", err)
+	}
+	if n := len(k.sent()); n != 1 {
+		t.Fatalf("%d auth_key frames", n)
+	}
+}
+
+func TestWSLateRefusalStopsKeyReauth(t *testing.T) {
+	ws, k := setupKeyAuthWS(t, "hmac", WSOptions{AckTimeout: 100 * time.Millisecond})
+	ctx := context.Background()
+	if _, err := ws.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	k.silent.Store(true)
+	if _, err := ws.AuthKey(ctx); err == nil {
+		t.Fatal("expected a timeout")
+	}
+	k.pushLast(map[string]any{"type": "error", "code": "UNAUTHENTICATED", "message": "bad key", "challenge": "late", "id": k.sent()[0]["id"]})
+	eventually(t, "keyAuth cleared", func() bool {
+		ws.mu.Lock()
+		defer ws.mu.Unlock()
+		return !ws.keyAuth
+	})
+	k.silent.Store(false)
+	k.drop()
+	eventually(t, "reconnect", func() bool { return k.connCount() == 2 && ws.Connected() })
+	time.Sleep(100 * time.Millisecond)
+	if n := len(k.sent()); n != 1 {
+		t.Fatalf("%d auth_key frames after a late refusal", n)
+	}
+}
+
+// slowSigner blocks its first signature until released (a KMS or HSM).
+type slowSigner struct {
+	a     *HMACAuthenticator
+	gate  chan struct{}
+	calls atomic.Int32
+}
+
+func (s *slowSigner) SignWebSocketChallenge(connectionID, challenge string) (string, string) {
+	if s.calls.Add(1) == 1 {
+		<-s.gate
+	}
+	return s.a.SignWebSocketChallenge(connectionID, challenge)
+}
+
+func TestWSSlowSignerRacingReconnect(t *testing.T) {
+	a, _ := NewHMACAuthenticator(sigTestKey, sigTestSecret)
+	slow := &slowSigner{a: a, gate: make(chan struct{})}
+	ws, k := setupKeyAuthWS(t, "hmac", WSOptions{KeySigner: slow})
+	ctx := context.Background()
+	if _, err := ws.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := ws.AuthKey(ctx); done <- err }()
+	eventually(t, "signing started", func() bool { return slow.calls.Load() == 1 })
+	k.drop() // the connection changes while the signer works
+	eventually(t, "re-auth on the new connection", func() bool { return k.connCount() == 2 && ws.UserID() == "u1" })
+	close(slow.gate)
+	var we *WSError
+	if err := <-done; !errors.As(err, &we) || we.Code != "STALE_CHALLENGE" {
+		t.Fatalf("got %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := len(k.sent()); n != 1 {
+		t.Fatalf("%d auth_key frames: the stale signature must never be sent", n)
+	}
+}
+
+func TestSignatureExpiredWithoutServerTime(t *testing.T) {
+	c, s, _, _ := newSigningClient(t, func(w http.ResponseWriter, r *http.Request, sr signedRequest, n int) {
+		writeJSON(w, 401, apiErr("SIGNATURE_EXPIRED", "timestamp outside the window", true))
+	})
+	_, err := c.Account.Balances(context.Background())
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Code != "SIGNATURE_EXPIRED" || strings.Contains(ae.Message, "clock") {
+		t.Fatalf("got %v", err)
+	}
+	if n := len(s.all()); n != 1 {
+		t.Fatalf("%d requests", n)
 	}
 }
 

@@ -206,7 +206,10 @@ func (t *transport) attempt(ctx context.Context, c call, o callOptions) (*rawRes
 	if f, isFloat := apiErr.Details["server_time_ms"].(float64); isFloat {
 		serverMs, isNum = int64(f), true
 	}
-	if !isNum || !h.adjustClock(serverMs) {
+	if !isNum {
+		return nil, err // no usable server clock: the error as the server sent it
+	}
+	if !h.adjustClock(serverMs) {
 		e := *apiErr
 		e.Message = "the local clock is more than 1 hour away from the server's: fix the system clock"
 		e.Retryable = false

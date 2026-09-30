@@ -67,16 +67,19 @@ func canonicalPath(path string) string {
 	return strings.Join(segs, "/")
 }
 
-// canonicalQuery splits on "&"; decodes and re-encodes names and values; sorts bytewise by name,
-// then value.
+// canonicalQuery splits on "&" (empty parts dropped); decodes and re-encodes names and values;
+// sorts bytewise by name, then value. query is everything after the FIRST "?" of the request
+// target, so a further "?" is data.
 func canonicalQuery(query string) string {
-	query = strings.TrimPrefix(query, "?")
 	if query == "" {
 		return ""
 	}
 	type pair struct{ n, v string }
 	var pairs []pair
 	for _, part := range strings.Split(query, "&") {
+		if part == "" {
+			continue // "a=1&&b=2" is "a=1&b=2"
+		}
 		n, v, _ := strings.Cut(part, "=")
 		pairs = append(pairs, pair{encodeRFC3986(percentDecode(n)), encodeRFC3986(percentDecode(v))})
 	}

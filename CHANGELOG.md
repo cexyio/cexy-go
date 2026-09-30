@@ -21,6 +21,8 @@ All notable changes to this project are documented here. The format follows
   automatic key re-auth after a refused key, and reports `AuthKeyRevoked` / `AuthKeyExpired`
   sign-outs. `Client.WebSocket` sets `WSOptions.KeySigner` when the client uses `Auth: "hmac"`.
   `AuthResult.Auth` says how the connection is authenticated; `Welcome.Challenge` is the challenge.
+  A signature that finishes after the connection changed is dropped (`STALE_CHALLENGE`); the
+  new connection signs its own challenge.
 - `NoReorderWindow`: set `WSOptions.ReorderWindow` to it to report private sequence gaps at once
   (0 still selects the 250 ms default).
 
