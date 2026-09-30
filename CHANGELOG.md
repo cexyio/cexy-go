@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `NoReorderWindow`: set `WSOptions.ReorderWindow` to it to report private sequence gaps at once
+  (0 still selects the 250 ms default).
+
 ### Fixed
 - `LiveBalances`: events that arrived while the owner lookup was in flight are dropped when the
   lookup ends in `ACCOUNT_MISMATCH` (they were kept until the next snapshot).

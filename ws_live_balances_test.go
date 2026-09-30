@@ -661,3 +661,30 @@ func TestLiveBalancesFollowUps(t *testing.T) {
 		}
 	})
 }
+
+func TestNoReorderWindowReportsGapAtOnce(t *testing.T) {
+	var mu sync.Mutex
+	var gaps []SequenceGap
+	ws, m := setupWS(t, WSOptions{ReorderWindow: NoReorderWindow, Handlers: WSHandlers{
+		OnSequenceGap: func(g SequenceGap) { mu.Lock(); gaps = append(gaps, g); mu.Unlock() },
+	}})
+	ctx := context.Background()
+	if _, err := ws.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Auth(ctx, "good"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Subscribe(ctx, "orders"); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int{5, 7} {
+		m.push(map[string]any{"type": "order.updated", "channel": "orders", "sequence": n, "data": map[string]any{"id": "o"}})
+	}
+	eventually(t, "gap", func() bool { mu.Lock(); defer mu.Unlock(); return len(gaps) == 1 })
+	mu.Lock()
+	defer mu.Unlock()
+	if gaps[0] != (SequenceGap{Channel: "orders", Expected: 6, Received: 7}) {
+		t.Fatalf("gap %+v", gaps[0])
+	}
+}

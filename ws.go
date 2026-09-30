@@ -131,6 +131,10 @@ const (
 	ResyncWithdrawalsResync ResyncReason = "withdrawals_resync"
 )
 
+// NoReorderWindow, as WSOptions.ReorderWindow, reports a sequence gap at once instead of waiting
+// for a swapped frame (0 selects the default).
+const NoReorderWindow time.Duration = -1
+
 // SequenceGap is passed to OnSequenceGap.
 type SequenceGap struct {
 	Channel  string
@@ -264,7 +268,7 @@ type WSOptions struct {
 	Handlers WSHandlers
 	// Private channels with several publishers (orders, account) can deliver two adjacent frames
 	// swapped: a missing sequence number gets this long to arrive before it counts as a gap.
-	// Default 250 ms.
+	// 0 selects the default, 250 ms; NoReorderWindow reports a gap at once.
 	ReorderWindow time.Duration
 	// TEST-ONLY: see WSClock.
 	Clock WSClock
@@ -368,7 +372,12 @@ func NewWebSocket(opts WSOptions) (*WebSocket, error) {
 	if opts.random == nil {
 		opts.random = rand.Float64
 	}
-	def(&opts.ReorderWindow, 250*time.Millisecond)
+	switch {
+	case opts.ReorderWindow == 0:
+		opts.ReorderWindow = 250 * time.Millisecond
+	case opts.ReorderWindow < 0:
+		opts.ReorderWindow = 0 // NoReorderWindow: the gap timer fires at once
+	}
 	if opts.Clock == nil {
 		opts.Clock = realClock{}
 	}
