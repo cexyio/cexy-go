@@ -55,6 +55,8 @@ type Welcome struct {
 	HeartbeatIntervalSeconds int    `json:"heartbeat_interval_seconds"`
 	MaxSubscriptions         int    `json:"max_subscriptions"`
 	ConnectionID             string `json:"connection_id"`
+	// Single-use challenge for AuthKey (planned API-key authentication).
+	Challenge string `json:"challenge,omitempty"`
 }
 
 // Event is a channel event such as ticker.update, orderbook.update or order.filled. Decode
@@ -108,6 +110,8 @@ type SubscribeResult struct {
 type AuthResult struct {
 	// From the authenticated acknowledgement; empty when queued.
 	UserID string
+	// How the connection is authenticated ("api_key" or "session"), when the server says.
+	Auth string
 	// True when not connected: the token is kept and sent (and acknowledged) on connect.
 	Queued bool
 }
@@ -140,6 +144,11 @@ type SequenceGap struct {
 	Channel  string
 	Expected int64
 	Received int64
+}
+
+// WSKeySigner signs a WebSocket auth_key challenge (an *HMACAuthenticator fits).
+type WSKeySigner interface {
+	SignWebSocketChallenge(connectionID, challenge string) (keyID, signature string)
 }
 
 // WSTimer is a stoppable timer (a *time.Timer fits).
@@ -179,6 +188,10 @@ const (
 	// AuthTokenExpired: the signed_out frame with reason "expired". Re-send Auth on every token
 	// refresh to avoid it.
 	AuthTokenExpired AuthChangeReason = "token_expired"
+	// AuthKeyRevoked: the API key was revoked or deleted (planned key authentication).
+	AuthKeyRevoked AuthChangeReason = "key_revoked"
+	// AuthKeyExpired: the API key expired (planned key authentication).
+	AuthKeyExpired AuthChangeReason = "key_expired"
 	// AuthSignedOut: a server sign-out with a reason this SDK does not know (raw value in Code).
 	// The set of reasons may grow.
 	AuthSignedOut AuthChangeReason = "signed_out"
@@ -272,6 +285,9 @@ type WSOptions struct {
 	ReorderWindow time.Duration
 	// TEST-ONLY: see WSClock.
 	Clock WSClock
+	// Signs AuthKey challenges (planned API-key authentication). Client.WebSocket sets it when
+	// the client uses Auth "hmac".
+	KeySigner WSKeySigner
 
 	snapshots snapshotSource
 	random    func() float64
@@ -293,7 +309,7 @@ type wsAck struct {
 	err   error
 }
 
-var ackType = map[string]string{"auth": "authenticated", "subscribe": "subscribed", "unsubscribe": "unsubscribed", "ping": "pong"}
+var ackType = map[string]string{"auth": "authenticated", "auth_key": "authenticated", "subscribe": "subscribed", "unsubscribe": "unsubscribed", "ping": "pong"}
 
 // WebSocket is the CEXY.io WebSocket client: heartbeat, liveness, subscriptions with local
 // limits, automatic reconnect with re-auth and re-subscribe, and live order books. It is safe
@@ -315,6 +331,8 @@ type WebSocket struct {
 	channels       []string
 	token          string
 	authUserID     string // user of the last successful auth on the current connection
+	challenge      string // latest unused auth_key challenge (welcome or the last auth_key reply)
+	keyAuth        bool   // AuthKey is the active credential (re-signed after reconnects)
 	seq            map[string]*seqState
 	liveBalances   []*LiveBalances
 	balancesByUs   bool     // balances was subscribed by LiveBalances
@@ -409,6 +427,9 @@ func (c *Client) WebSocket(opts WSOptions) (*WebSocket, error) {
 		opts.HTTPClient = c.t.http
 	}
 	opts.snapshots = c
+	if h, ok := c.t.auth.(*HMACAuthenticator); ok && opts.KeySigner == nil {
+		opts.KeySigner = h
+	}
 	return NewWebSocket(opts)
 }
 
@@ -541,7 +562,9 @@ func (w *WebSocket) onWelcome(welcome Welcome) {
 	w.everConnected = true
 	w.authUserID = ""    // a new connection starts signed out
 	w.resetSeqLocked("") // sequences on a new connection are unrelated
+	w.challenge = welcome.Challenge
 	token := w.token
+	keyAuth := w.keyAuth
 	channels := append([]string(nil), w.channels...)
 	books := w.bookList()
 	w.mu.Unlock()
@@ -551,11 +574,15 @@ func (w *WebSocket) onWelcome(welcome Welcome) {
 			w.h.OnWelcome(welcome)
 		}
 	})
-	if token != "" || len(channels) > 0 {
+	if token != "" || keyAuth || len(channels) > 0 {
 		go func() {
 			ctx := context.Background()
 			if token != "" {
 				if _, err := w.auth(ctx, token); err != nil {
+					w.emitError(err)
+				}
+			} else if keyAuth {
+				if _, err := w.authKey(ctx); err != nil {
 					w.emitError(err)
 				}
 			}
@@ -592,12 +619,55 @@ func (w *WebSocket) Auth(ctx context.Context, token string) (AuthResult, error) 
 	}
 	w.mu.Lock()
 	w.token = token
+	w.keyAuth = false
 	connected := w.conn != nil && w.welcome != nil
 	w.mu.Unlock()
 	if !connected {
 		return AuthResult{Queued: true}, nil
 	}
 	return w.auth(ctx, token)
+}
+
+// AuthKey authenticates with the client's API key (PLANNED: the server does not accept it yet).
+// It signs the server's single-use challenge; the secret never leaves the process. After a
+// reconnect it signs the new connection's challenge automatically. A refused auth_key stops the
+// automatic re-auth (the server closes the socket after 5 failures). It needs WSOptions.KeySigner
+// (Client.WebSocket sets it when the client uses Auth "hmac").
+func (w *WebSocket) AuthKey(ctx context.Context) (AuthResult, error) {
+	if w.opts.KeySigner == nil {
+		return AuthResult{}, &ConfigError{Msg: `AuthKey needs a client created with Auth "hmac" (or WSOptions.KeySigner)`}
+	}
+	w.mu.Lock()
+	w.token = ""
+	w.keyAuth = true
+	connected := w.conn != nil && w.welcome != nil
+	w.mu.Unlock()
+	if !connected {
+		return AuthResult{Queued: true}, nil
+	}
+	return w.authKey(ctx)
+}
+
+func (w *WebSocket) authKey(ctx context.Context) (AuthResult, error) {
+	w.mu.Lock()
+	challenge := w.challenge
+	w.challenge = "" // a challenge is signed at most once
+	connID := ""
+	if w.welcome != nil {
+		connID = w.welcome.ConnectionID
+	}
+	w.mu.Unlock()
+	if challenge == "" || connID == "" || w.opts.KeySigner == nil {
+		return AuthResult{}, &WSError{Code: "NO_CHALLENGE", Message: "AuthKey: the server has not issued a challenge on this connection"}
+	}
+	keyID, sig := w.opts.KeySigner.SignWebSocketChallenge(connID, challenge)
+	ack, err := w.request(ctx, "auth_key", map[string]any{"key_id": keyID, "signature": sig}, nil, true)
+	if err != nil {
+		return AuthResult{}, err
+	}
+	uid, _ := ack["user_id"].(string)
+	kind, _ := ack["auth"].(string)
+	return AuthResult{UserID: uid, Auth: kind}, nil
 }
 
 func (w *WebSocket) auth(ctx context.Context, token string) (AuthResult, error) {
@@ -850,6 +920,12 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 		})
 		return
 	case "authenticated":
+		// Every auth_key reply carries the next challenge: store it before anything else.
+		if ch, ok := frame["challenge"].(string); ok {
+			w.mu.Lock()
+			w.challenge = ch
+			w.mu.Unlock()
+		}
 		uid, _ := frame["user_id"].(string)
 		w.dispatch(func() {
 			if w.h.OnAuthenticated != nil {
@@ -859,7 +935,7 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 		// Update the state before Auth returns, and before any later frame.
 		w.onAuthenticated(uid)
 		if id != "" {
-			w.settle(id, "auth", frame, nil)
+			w.settle(id, "auth|auth_key", frame, nil)
 		}
 		return
 	case "subscribed", "unsubscribed":
@@ -917,6 +993,11 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 			})
 		case "expired":
 			w.signedOut(AuthTokenExpired, "")
+		case string(AuthKeyRevoked), string(AuthKeyExpired):
+			w.mu.Lock()
+			w.keyAuth = false // the key cannot sign in again
+			w.mu.Unlock()
+			w.signedOut(AuthChangeReason(raw), "")
 		default:
 			w.signedOut(AuthSignedOut, raw)
 		}
@@ -931,12 +1012,20 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 			msg = code
 		}
 		werr := &WSError{Code: code, Message: msg, FromServer: true}
+		if ch, ok := frame["challenge"].(string); ok {
+			w.mu.Lock()
+			w.challenge = ch
+			w.mu.Unlock()
+		}
 		if id != "" {
 			// Any error on an auth frame signs the connection out (an UNAUTHENTICATED error on a
 			// subscribe is only a refused subscribe).
 			w.mu.Lock()
 			p, ok := w.pending[id]
-			isAuth := ok && p.kind == "auth"
+			isAuth := ok && (p.kind == "auth" || p.kind == "auth_key")
+			if ok && p.kind == "auth_key" {
+				w.keyAuth = false // a refused key is not tried again automatically
+			}
 			w.mu.Unlock()
 			if isAuth {
 				w.signedOut(AuthFailed, code)
@@ -1211,12 +1300,12 @@ func (w *WebSocket) onAuthenticated(userID string) {
 	})
 }
 
-// settle completes pending request id if the acknowledgement matches its kind ("" = any, for
-// error frames).
+// settle completes pending request id if the acknowledgement matches its kind (kinds joined
+// with "|"; "" = any, for error frames).
 func (w *WebSocket) settle(id, kind string, frame map[string]any, err error) {
 	w.mu.Lock()
 	p, ok := w.pending[id]
-	if !ok || (kind != "" && p.kind != kind) {
+	if !ok || (kind != "" && !slices.Contains(strings.Split(kind, "|"), p.kind)) {
 		w.mu.Unlock()
 		return
 	}

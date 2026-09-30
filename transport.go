@@ -184,8 +184,38 @@ func (t *transport) retryDelay(attempt int, cause error) time.Duration {
 	return time.Duration(math.Ceil(t.random() * capped))
 }
 
-// attempt is one try: rate limiter, credentials, timeout, error mapping. No retries.
+// attempt is one try: rate limiter, credentials, timeout, error mapping. No retries, except ONE
+// re-signed resend after SIGNATURE_EXPIRED once the client clock has been corrected.
 func (t *transport) attempt(ctx context.Context, c call, o callOptions) (*rawResponse, error) {
+	res, err := t.attemptOnce(ctx, c, o)
+	var apiErr *APIError
+	if err == nil || !errors.As(err, &apiErr) {
+		return res, err
+	}
+	if apiErr.Code == "KEY_NOT_SIGNABLE" {
+		e := *apiErr
+		e.Message = "create a new API key; keys issued before request signing can't sign"
+		e.Retryable = false
+		return nil, &e
+	}
+	h, ok := t.auth.(*HMACAuthenticator)
+	if apiErr.Code != "SIGNATURE_EXPIRED" || !ok {
+		return nil, err
+	}
+	serverMs, isNum := apiErr.Details["server_time_ms"].(int64)
+	if f, isFloat := apiErr.Details["server_time_ms"].(float64); isFloat {
+		serverMs, isNum = int64(f), true
+	}
+	if !isNum || !h.adjustClock(serverMs) {
+		e := *apiErr
+		e.Message = "the local clock is more than 1 hour away from the server's: fix the system clock"
+		e.Retryable = false
+		return nil, &e
+	}
+	return t.attemptOnce(ctx, c, o) // re-signed with the corrected clock, once
+}
+
+func (t *transport) attemptOnce(ctx context.Context, c call, o callOptions) (*rawResponse, error) {
 	info, ok := operations[c.op]
 	if !ok {
 		return nil, &ConfigError{Msg: fmt.Sprintf("unknown operation %q", c.op)}
@@ -291,14 +321,16 @@ func (t *transport) buildURL(info OperationInfo, c call) (string, error) {
 			missing = name
 			return ""
 		}
-		return url.PathEscape(v)
+		return encodeRFC3986(v) // RFC 3986, uppercase hex: what is sent is what is signed
 	})
 	if missing != "" {
 		return "", &ConfigError{Msg: fmt.Sprintf(`%s %s: %s is required (non-empty, not "." or "..", no CR/LF)`,
 			info.Method, info.Path, missing)}
 	}
 	u := t.baseURL + path
-	if q := c.query.Encode(); q != "" {
+	// RFC 3986 (%20 for a space), not url.Values.Encode (+ for a space): the query that is signed
+	// is exactly the query that is sent.
+	if q := encodeQuery(c.query); q != "" {
 		u += "?" + q
 	}
 	return u, nil

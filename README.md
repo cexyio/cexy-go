@@ -298,6 +298,20 @@ skipped (after a short reorder window, `WSOptions.ReorderWindow`, default 250 ms
 `balances.resync`, `deposits.resync` and `withdrawals.resync` (the last two planned) call `OnResync`
 with `ResyncBalancesResync`, `ResyncDepositsResync` or `ResyncWithdrawalsResync`.
 
+### Request signing (planned)
+
+The API will accept signed requests instead of the secret header. The SDK is ready; keep the default
+until the API announces it:
+
+```go
+client, err := cexy.New(cexy.Options{APIKey: key, APISecret: secret, Auth: "hmac"}) // default: "headers"
+```
+
+With `Auth: "hmac"` the secret never leaves your process: every private request is signed
+(`X-API-Key`, `X-API-Timestamp`, `X-API-Nonce`, `X-API-Signature`), every retry with a fresh
+timestamp and nonce. A key issued before signing existed fails with `KEY_NOT_SIGNABLE`: create a new
+API key. `ws.AuthKey(ctx)` authenticates a WebSocket with the same key.
+
 ### Live balances
 
 ```go
