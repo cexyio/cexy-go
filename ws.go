@@ -893,7 +893,9 @@ func (w *WebSocket) dropPrivateLocked() []string {
 		}
 	}
 	w.channels = kept
-	w.pendingPrivate = append(w.pendingPrivate, dropped...)
+	for _, c := range dropped {
+		w.pendingPrivate = addUnique(w.pendingPrivate, c)
+	}
 	return dropped
 }
 
@@ -945,7 +947,7 @@ func (w *WebSocket) onAuthenticated(userID string) {
 			for _, c := range channels {
 				if w.holds(c) {
 					w.drop(c)
-					w.pendingPrivate = append(w.pendingPrivate, c)
+					w.pendingPrivate = addUnique(w.pendingPrivate, c)
 				}
 			}
 			w.mu.Unlock()
@@ -1182,6 +1184,15 @@ func (w *WebSocket) holds(c string) bool {
 		}
 	}
 	return false
+}
+
+func addUnique(list []string, c string) []string {
+	for _, x := range list {
+		if x == c {
+			return list
+		}
+	}
+	return append(list, c)
 }
 
 func remove(list []string, c string) []string {
