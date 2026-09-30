@@ -14,7 +14,7 @@ The official Go SDK for the [CEXY.io](https://cexy.io) REST and WebSocket API.
 ## Install
 
 ```bash
-go get github.com/cexyio/cexy-go@v0.1.0-dev.5
+go get github.com/cexyio/cexy-go@v0.1.0-dev.6
 ```
 
 ```go
@@ -278,6 +278,13 @@ What the client does for you:
 **API-key authentication on the WebSocket is not available yet**: with an API key, use public channels
 and poll REST for private state. If the session is revoked, the client calls `OnAuthLost`; public
 channels keep working.
+
+The server ends private subscriptions, without any frame, when `Auth` succeeds as another user,
+when an `Auth` fails (any error signs the connection out), or when this connection's own session
+is revoked (`session.revoked` with `current: true`). The client calls `OnAuthChanged` (`Reason`:
+`AuthUserChanged`, `AuthFailed` or `AuthSessionRevoked`, plus the `Dropped` channels) and
+re-subscribes those channels itself: at once for another user, after the next successful `Auth`
+otherwise, followed by `OnResync(ResyncReauth)` (refetch private state).
 
 ## Security
 
