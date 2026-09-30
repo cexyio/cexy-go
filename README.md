@@ -14,7 +14,7 @@ The official Go SDK for the [CEXY.io](https://cexy.io) REST and WebSocket API.
 ## Install
 
 ```bash
-go get github.com/cexyio/cexy-go@v0.1.0-dev.6
+go get github.com/cexyio/cexy-go@v0.1.0-dev.7
 ```
 
 ```go
@@ -285,6 +285,39 @@ is revoked (`session.revoked` with `current: true`). The client calls `OnAuthCha
 `AuthUserChanged`, `AuthFailed` or `AuthSessionRevoked`, plus the `Dropped` channels) and
 re-subscribes those channels itself: at once for another user, after the next successful `Auth`
 otherwise, followed by `OnResync(ResyncReauth)` (refetch private state).
+
+The server can also sign a connection out by itself: `signed_out` (a planned server frame; this
+SDK already handles it). Reason `expired` gives `OnAuthChanged` with `AuthTokenExpired`, reason
+`revoked` gives `AuthSessionRevoked` plus `OnAuthLost`, and any other reason gives `AuthSignedOut`
+with the raw value in `Code`. Call `Auth` again with the fresh token on every token refresh; that
+keeps the private subscriptions.
+
+**Missed private events.** Every private frame carries a per-connection `Sequence`. When numbers are
+skipped (after a short reorder window, `WSOptions.ReorderWindow`, default 250 ms), the client calls
+`OnSequenceGap` and `OnResync(ResyncSequenceGap)`: refetch that channel's state over REST.
+`balances.resync`, `deposits.resync` and `withdrawals.resync` (the last two planned) call `OnResync`
+with `ResyncBalancesResync`, `ResyncDepositsResync` or `ResyncWithdrawalsResync`.
+
+### Live balances
+
+```go
+ws, _ := c.WebSocket(cexy.WSOptions{}) // c has an API key
+ws.Connect(ctx)
+ws.Auth(ctx, sessionToken)
+lb, err := ws.LiveBalances(ctx, cexy.LiveBalancesOptions{
+	OnUpdate: func(asset string, b *cexy.Balance) { /* b == nil: removed */ },
+})
+usdt, ok := lb.Get("USDT")
+_ = lb.Stale()     // true while a refetch is pending
+_ = lb.LastError() // *cexy.AccountMismatchError: nothing merged
+```
+
+`LiveBalances` subscribes `balances`, takes a REST snapshot and applies newer `balance.updated`
+events (only when their `sequence` is greater than the one it holds; a total of 0 removes the row).
+It refetches by itself on a missed event, `balances.resync`, `CONCURRENT_MODIFICATION`, a reconnect
+or an account change, at most every `MinSnapshotInterval` (default 2 s; `cexy.NoMinimum` for none, since 0 selects the default), and
+never because a balance's own sequence skipped values. At the start and after every account change it checks that the REST
+key's account (`Account.ID`) is the WebSocket's authenticated user: otherwise nothing is merged.
 
 ## Security
 

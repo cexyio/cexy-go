@@ -25,6 +25,7 @@ const (
 	OpExportOrders            OperationID = "export_orders"
 	OpExportTrades            OperationID = "export_trades"
 	OpExportWithdrawals       OperationID = "export_withdrawals"
+	OpGetAccountID            OperationID = "get_account_id"
 	OpGetAsset                OperationID = "get_asset"
 	OpGetBalance              OperationID = "get_balance"
 	OpGetCandles              OperationID = "get_candles"
@@ -70,6 +71,7 @@ var operations = map[OperationID]OperationInfo{
 	OpExportOrders:            {Method: "GET", Path: "/api/v1/exports/orders", Auth: "api_key", Scope: "read"},
 	OpExportTrades:            {Method: "GET", Path: "/api/v1/exports/trades", Auth: "api_key", Scope: "read"},
 	OpExportWithdrawals:       {Method: "GET", Path: "/api/v1/exports/withdrawals", Auth: "api_key", Scope: "read"},
+	OpGetAccountID:            {Method: "GET", Path: "/api/v1/account/id", Auth: "api_key", Scope: "read"},
 	OpGetAsset:                {Method: "GET", Path: "/api/v1/assets/{symbol}", Auth: "none", Scope: ""},
 	OpGetBalance:              {Method: "GET", Path: "/api/v1/account/balances/{asset}", Auth: "api_key", Scope: "read"},
 	OpGetCandles:              {Method: "GET", Path: "/api/v1/markets/{symbol}/candles", Auth: "none", Scope: ""},

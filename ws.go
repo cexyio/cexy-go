@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,6 +35,7 @@ var knownEventTypes = map[string]bool{
 	"order.created": true, "order.updated": true, "order.cancelled": true, "order.filled": true,
 	"balance.updated": true, "deposit.detected": true, "deposit.updated": true, "deposit.completed": true,
 	"withdrawal.updated": true, "session.revoked": true,
+	"balances.resync": true, "deposits.resync": true, "withdrawals.resync": true,
 }
 
 // WSError is a WebSocket protocol error, a server error frame (FromServer), or a local guard.
@@ -119,7 +121,45 @@ const (
 	// ResyncReauth: private channels were re-subscribed after the server signed the
 	// connection out or switched it to another account; refetch private state through REST.
 	ResyncReauth ResyncReason = "reauth"
+	// ResyncSequenceGap: a private channel skipped sequence numbers (see OnSequenceGap).
+	ResyncSequenceGap ResyncReason = "sequence_gap"
+	// ResyncBalancesResync: balances.resync, the server could not resume its balance change stream.
+	ResyncBalancesResync ResyncReason = "balances_resync"
+	// ResyncDepositsResync: deposits.resync (planned server frame), refetch the deposit list.
+	ResyncDepositsResync ResyncReason = "deposits_resync"
+	// ResyncWithdrawalsResync: withdrawals.resync (planned server frame), refetch the withdrawal list.
+	ResyncWithdrawalsResync ResyncReason = "withdrawals_resync"
 )
+
+// SequenceGap is passed to OnSequenceGap.
+type SequenceGap struct {
+	Channel  string
+	Expected int64
+	Received int64
+}
+
+// WSTimer is a stoppable timer (a *time.Timer fits).
+type WSTimer interface{ Stop() bool }
+
+// WSClock is a TEST-ONLY time source for the reorder-window timer and LiveBalances scheduling
+// (minimum snapshot interval, retry backoff). Socket timeouts always use the real clock. Leave
+// WSOptions.Clock nil in production.
+type WSClock interface {
+	Now() time.Time
+	AfterFunc(d time.Duration, f func()) WSTimer
+}
+
+type realClock struct{}
+
+func (realClock) Now() time.Time                              { return time.Now() }
+func (realClock) AfterFunc(d time.Duration, f func()) WSTimer { return time.AfterFunc(d, f) }
+
+type seqState struct {
+	next  int64
+	holes map[int64]bool
+	first *SequenceGap
+	timer WSTimer
+}
 
 // AuthChangeReason says why the server ended the connection's private subscriptions.
 type AuthChangeReason string
@@ -130,8 +170,14 @@ const (
 	// AuthFailed: an Auth failed; the server signs the connection out on any auth error.
 	AuthFailed AuthChangeReason = "auth_failed"
 	// AuthSessionRevoked: this connection's own session was revoked (session.revoked with
-	// current true).
+	// current true, or the signed_out frame with reason "revoked").
 	AuthSessionRevoked AuthChangeReason = "session_revoked"
+	// AuthTokenExpired: the signed_out frame with reason "expired". Re-send Auth on every token
+	// refresh to avoid it.
+	AuthTokenExpired AuthChangeReason = "token_expired"
+	// AuthSignedOut: a server sign-out with a reason this SDK does not know (raw value in Code).
+	// The set of reasons may grow.
+	AuthSignedOut AuthChangeReason = "signed_out"
 )
 
 // AuthChange is passed to OnAuthChanged.
@@ -141,7 +187,7 @@ type AuthChange struct {
 	PreviousUserID string
 	// The new user (AuthUserChanged), otherwise empty: the connection is signed out.
 	UserID string
-	// The server's error code (AuthFailed only).
+	// The server's error code (AuthFailed), or the raw signed_out reason (AuthSignedOut).
 	Code string
 	// Private channels the server dropped. They are re-subscribed automatically: at once for
 	// AuthUserChanged, after the next successful Auth otherwise (then OnResync(ResyncReauth)).
@@ -178,6 +224,9 @@ type WSHandlers struct {
 	// The server ended this connection's private subscriptions: Auth succeeded as another
 	// user, an Auth failed, or this connection's own session was revoked.
 	OnAuthChanged func(AuthChange)
+	// A private channel skipped sequence numbers on this connection (after the reorder window):
+	// events were lost. Followed by OnResync(ResyncSequenceGap); refetch that channel's state.
+	OnSequenceGap func(SequenceGap)
 }
 
 // WSOptions configures a WebSocket.
@@ -213,6 +262,12 @@ type WSOptions struct {
 	// Default slog.Default().
 	Logger   *slog.Logger
 	Handlers WSHandlers
+	// Private channels with several publishers (orders, account) can deliver two adjacent frames
+	// swapped: a missing sequence number gets this long to arrive before it counts as a gap.
+	// Default 250 ms.
+	ReorderWindow time.Duration
+	// TEST-ONLY: see WSClock.
+	Clock WSClock
 
 	snapshots snapshotSource
 	random    func() float64
@@ -255,7 +310,10 @@ type WebSocket struct {
 	welcome        *Welcome
 	channels       []string
 	token          string
-	authUserID     string   // user of the last successful auth on the current connection
+	authUserID     string // user of the last successful auth on the current connection
+	seq            map[string]*seqState
+	liveBalances   []*LiveBalances
+	balancesByUs   bool     // balances was subscribed by LiveBalances
 	pendingPrivate []string // dropped by a server sign-out; re-subscribed after the next successful auth
 	pending        map[string]*wsPending
 	nextID         int
@@ -310,6 +368,10 @@ func NewWebSocket(opts WSOptions) (*WebSocket, error) {
 	if opts.random == nil {
 		opts.random = rand.Float64
 	}
+	def(&opts.ReorderWindow, 250*time.Millisecond)
+	if opts.Clock == nil {
+		opts.Clock = realClock{}
+	}
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -318,6 +380,7 @@ func NewWebSocket(opts WSOptions) (*WebSocket, error) {
 		url: opts.URL, opts: opts, log: logger, h: opts.Handlers,
 		pending: map[string]*wsPending{}, nextID: 1, closedByUser: true,
 		books: map[string]*LiveOrderBook{}, dispatchSignal: make(chan struct{}, 1),
+		seq: map[string]*seqState{},
 	}, nil
 }
 
@@ -467,7 +530,8 @@ func (w *WebSocket) onWelcome(welcome Welcome) {
 	}
 	isReconnect := w.everConnected
 	w.everConnected = true
-	w.authUserID = "" // a new connection starts signed out
+	w.authUserID = ""    // a new connection starts signed out
+	w.resetSeqLocked("") // sequences on a new connection are unrelated
 	token := w.token
 	channels := append([]string(nil), w.channels...)
 	books := w.bookList()
@@ -552,6 +616,13 @@ func (w *WebSocket) HasToken() bool {
 	return w.token != ""
 }
 
+// UserID is the user of the last successful Auth on the current connection ("" when signed out).
+func (w *WebSocket) UserID() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.authUserID
+}
+
 // Ping sends a ping with an id and returns the round-trip time.
 func (w *WebSocket) Ping(ctx context.Context) (time.Duration, error) {
 	start := time.Now()
@@ -614,6 +685,7 @@ func (w *WebSocket) Unsubscribe(ctx context.Context, channels ...string) error {
 	var held []string
 	for _, c := range uniq(channels) {
 		w.pendingPrivate = remove(w.pendingPrivate, c)
+		w.resetSeqLocked(c)
 		if w.holds(c) {
 			held = append(held, c)
 			w.drop(c)
@@ -673,16 +745,21 @@ func (w *WebSocket) Close() error {
 	}
 	w.closedByUser = true
 	w.authUserID = ""
+	w.resetSeqLocked("")
 	if w.stop != nil {
 		close(w.stop)
 		w.stop = nil
 	}
 	conn := w.conn
 	books := w.bookList()
+	helpers := append([]*LiveBalances(nil), w.liveBalances...)
 	w.teardownLocked(&WSError{Code: "CLOSED", Message: "connection closed by client"})
 	w.mu.Unlock()
 	for _, b := range books {
 		b.markDisconnected()
+	}
+	for _, lb := range helpers {
+		lb.markStale() // no connection: nothing is live any more
 	}
 	if conn != nil {
 		_ = conn.Close(websocket.StatusNormalClosure, "client closing") // best effort, like any close
@@ -782,6 +859,19 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 		if typ == "unsubscribed" {
 			kind = "unsubscribe"
 		}
+		if typ == "subscribed" {
+			w.mu.Lock()
+			for _, c := range channels {
+				w.resetSeqLocked(c) // the next frame is the new baseline
+			}
+			helpers := append([]*LiveBalances(nil), w.liveBalances...)
+			w.mu.Unlock()
+			if slices.Contains(channels, "balances") {
+				for _, lb := range helpers {
+					lb.trigger("resubscribed")
+				}
+			}
+		}
 		if id != "" {
 			w.settle(id, kind, frame, nil)
 		} else {
@@ -794,6 +884,33 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 				w.h.OnUnsubscribed(channels)
 			}
 		})
+		return
+	case "signed_out":
+		// signed_out (a planned server frame): the server signed this connection out (token
+		// expired, session revoked, or a future reason). Private subscriptions are gone; a fresh
+		// Auth on this socket restores them.
+		raw, _ := frame["reason"].(string)
+		if raw == "" {
+			raw = "unknown"
+		}
+		w.mu.Lock()
+		w.token = ""
+		w.mu.Unlock()
+		switch raw {
+		case "revoked":
+			w.signedOut(AuthSessionRevoked, "")
+			lost := Event{Type: "session.revoked", Channel: "account",
+				Data: json.RawMessage(`{"session_id":null,"reason":"signed_out","current":true}`)}
+			w.dispatch(func() {
+				if w.h.OnAuthLost != nil {
+					w.h.OnAuthLost(lost)
+				}
+			})
+		case "expired":
+			w.signedOut(AuthTokenExpired, "")
+		default:
+			w.signedOut(AuthSignedOut, raw)
+		}
 		return
 	case "error":
 		code, _ := frame["code"].(string)
@@ -831,9 +948,13 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 			})
 			w.mu.Lock()
 			books := w.bookList()
+			helpers := append([]*LiveBalances(nil), w.liveBalances...)
 			w.mu.Unlock()
 			for _, b := range books {
 				go b.resync(0)
+			}
+			for _, lb := range helpers {
+				lb.trigger(string(ResyncConcurrentModification))
 			}
 		}
 		return
@@ -845,6 +966,31 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 	var ev Event
 	if remarshal(frame, &ev) != nil {
 		return
+	}
+	if PrivateChannels[ev.Channel] && ev.Sequence != nil {
+		w.trackSeq(ev.Channel, *ev.Sequence)
+	}
+	switch ev.Type {
+	case "balances.resync", "deposits.resync", "withdrawals.resync":
+		reason := ResyncReason(strings.ReplaceAll(ev.Type, ".", "_"))
+		w.dispatch(func() {
+			if w.h.OnEvent != nil {
+				w.h.OnEvent(ev)
+			}
+			if w.h.OnResync != nil {
+				w.h.OnResync(reason)
+			}
+		})
+		if ev.Type == "balances.resync" {
+			for _, lb := range w.helpers() {
+				lb.trigger(string(ResyncBalancesResync))
+			}
+		}
+		return
+	case "balance.updated":
+		for _, lb := range w.helpers() {
+			lb.onEvent(ev.Data)
+		}
 	}
 	var book *LiveOrderBook
 	if ev.Type == "orderbook.update" {
@@ -881,6 +1027,83 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 	})
 }
 
+func (w *WebSocket) helpers() []*LiveBalances {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]*LiveBalances(nil), w.liveBalances...)
+}
+
+// resetSeqLocked forgets the sequence baseline of channel ("" for all channels).
+func (w *WebSocket) resetSeqLocked(channel string) {
+	for c, st := range w.seq {
+		if channel == "" || c == channel {
+			if st.timer != nil {
+				st.timer.Stop()
+			}
+			delete(w.seq, c)
+		}
+	}
+}
+
+// trackSeq: the first frame of a private channel is the baseline, a lower number is late (never a
+// gap), and a higher one opens holes that must fill within the reorder window.
+func (w *WebSocket) trackSeq(channel string, n int64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	st := w.seq[channel]
+	if st == nil {
+		w.seq[channel] = &seqState{next: n + 1, holes: map[int64]bool{}}
+		return
+	}
+	if n < st.next {
+		if st.holes[n] {
+			delete(st.holes, n)
+			if len(st.holes) == 0 && st.timer != nil {
+				st.timer.Stop()
+				st.timer = nil
+				st.first = nil
+			}
+		}
+		return
+	}
+	if n > st.next && st.first == nil {
+		st.first = &SequenceGap{Channel: channel, Expected: st.next, Received: n}
+	}
+	for m := st.next; m < n; m++ {
+		st.holes[m] = true
+	}
+	st.next = n + 1
+	if len(st.holes) > 0 && st.timer == nil {
+		state := st
+		st.timer = w.opts.Clock.AfterFunc(w.opts.ReorderWindow, func() {
+			w.mu.Lock()
+			state.timer = nil
+			if len(state.holes) == 0 || w.seq[channel] != state {
+				w.mu.Unlock()
+				return
+			}
+			gap := *state.first
+			state.holes = map[int64]bool{}
+			state.first = nil
+			helpers := append([]*LiveBalances(nil), w.liveBalances...)
+			w.mu.Unlock()
+			w.dispatch(func() {
+				if w.h.OnSequenceGap != nil {
+					w.h.OnSequenceGap(gap)
+				}
+				if w.h.OnResync != nil {
+					w.h.OnResync(ResyncSequenceGap)
+				}
+			})
+			if channel == "balances" {
+				for _, lb := range helpers {
+					lb.trigger(string(ResyncSequenceGap))
+				}
+			}
+		})
+	}
+}
+
 // dropPrivateLocked moves the held private channels to the pending set and returns them.
 func (w *WebSocket) dropPrivateLocked() []string {
 	dropped := []string{}
@@ -904,8 +1127,15 @@ func (w *WebSocket) signedOut(reason AuthChangeReason, code string) {
 	w.mu.Lock()
 	change := AuthChange{Reason: reason, PreviousUserID: w.authUserID, Code: code}
 	w.authUserID = ""
+	for c := range PrivateChannels {
+		w.resetSeqLocked(c)
+	}
 	change.Dropped = w.dropPrivateLocked()
+	helpers := append([]*LiveBalances(nil), w.liveBalances...)
 	w.mu.Unlock()
+	for _, lb := range helpers {
+		lb.onAuthChanged(reason)
+	}
 	w.dispatch(func() {
 		if w.h.OnAuthChanged != nil {
 			w.h.OnAuthChanged(change)
@@ -921,12 +1151,21 @@ func (w *WebSocket) onAuthenticated(userID string) {
 	w.authUserID = userID
 	var change *AuthChange
 	if previous != "" && userID != previous {
+		for c := range PrivateChannels {
+			w.resetSeqLocked(c)
+		}
 		change = &AuthChange{Reason: AuthUserChanged, PreviousUserID: previous, UserID: userID, Dropped: w.dropPrivateLocked()}
 	}
 	channels := w.pendingPrivate
 	w.pendingPrivate = nil
 	w.channels = append(w.channels, channels...)
+	helpers := append([]*LiveBalances(nil), w.liveBalances...)
 	w.mu.Unlock()
+	if change != nil {
+		for _, lb := range helpers {
+			lb.onAuthChanged(AuthUserChanged)
+		}
+	}
 	if change != nil {
 		w.dispatch(func() {
 			if w.h.OnAuthChanged != nil {
@@ -1083,10 +1322,14 @@ func (w *WebSocket) onDropped(gen, code int, reason string) {
 		w.reconnecting = true
 	}
 	stop := w.stop
+	helpers := append([]*LiveBalances(nil), w.liveBalances...)
 	w.mu.Unlock()
 	conn.CloseNow()
 	for _, b := range books {
 		b.markDisconnected() // sequences reset per connection
+	}
+	for _, lb := range helpers {
+		lb.markStale() // the re-subscribe after the reconnect takes a new snapshot
 	}
 	w.dispatch(func() {
 		if w.h.OnClose != nil {

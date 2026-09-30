@@ -26,6 +26,8 @@ type mockWS struct {
 	frames    []map[string]any // every client frame, all connections
 	silent    bool             // no welcome, no acks (liveness tests)
 	refuseSub atomic.Bool      // answer subscribe with UNAUTHENTICATED
+	ownerID   atomic.Value     // string: GET /api/v1/account/id answer
+	balCalls  atomic.Int32     // GET /api/v1/account/balances calls
 	snapshots atomic.Int32
 	seq       atomic.Int64 // sequence of the REST snapshot
 }
@@ -37,6 +39,16 @@ func (m *mockWS) handler(t *testing.T) http.HandlerFunc {
 				m.snapshots.Add(1)
 				writeJSON(w, 200, dataEnv(map[string]any{"symbol": "BTC/USDT", "sequence": m.seq.Load(),
 					"timestamp": "2026-09-27T10:00:00Z", "bids": [][]string{{"100", "1"}}, "asks": [][]string{{"101", "1"}}}))
+				return
+			}
+			if r.URL.Path == "/api/v1/account/id" {
+				owner, _ := m.ownerID.Load().(string)
+				writeJSON(w, 200, dataEnv(map[string]any{"user_id": owner}))
+				return
+			}
+			if r.URL.Path == "/api/v1/account/balances" {
+				m.balCalls.Add(1)
+				writeJSON(w, 200, dataEnv([]any{}))
 				return
 			}
 			writeJSON(w, 404, apiErr("NOT_FOUND", "nothing here", false))
@@ -135,7 +147,7 @@ func setupWS(t *testing.T, opts WSOptions) (*WebSocket, *mockWS) {
 	m.seq.Store(10)
 	srv := httptest.NewServer(m.handler(t))
 	t.Cleanup(srv.Close)
-	c, err := New(Options{BaseURL: srv.URL, AllowInsecure: true, DisableRateLimit: true})
+	c, err := New(Options{BaseURL: srv.URL, AllowInsecure: true, DisableRateLimit: true, APIKey: "ak_test", APISecret: "test_secret_value"})
 	if err != nil {
 		t.Fatal(err)
 	}
