@@ -116,7 +116,37 @@ type ResyncReason string
 const (
 	ResyncConcurrentModification ResyncReason = "concurrent_modification"
 	ResyncReconnect              ResyncReason = "reconnect"
+	// ResyncReauth: private channels were re-subscribed after the server signed the
+	// connection out or switched it to another account; refetch private state through REST.
+	ResyncReauth ResyncReason = "reauth"
 )
+
+// AuthChangeReason says why the server ended the connection's private subscriptions.
+type AuthChangeReason string
+
+const (
+	// AuthUserChanged: Auth succeeded as a different user.
+	AuthUserChanged AuthChangeReason = "user_changed"
+	// AuthFailed: an Auth failed; the server signs the connection out on any auth error.
+	AuthFailed AuthChangeReason = "auth_failed"
+	// AuthSessionRevoked: this connection's own session was revoked (session.revoked with
+	// current true).
+	AuthSessionRevoked AuthChangeReason = "session_revoked"
+)
+
+// AuthChange is passed to OnAuthChanged.
+type AuthChange struct {
+	Reason AuthChangeReason
+	// The user of the last successful auth on this connection, or empty.
+	PreviousUserID string
+	// The new user (AuthUserChanged), otherwise empty: the connection is signed out.
+	UserID string
+	// The server's error code (AuthFailed only).
+	Code string
+	// Private channels the server dropped. They are re-subscribed automatically: at once for
+	// AuthUserChanged, after the next successful Auth otherwise (then OnResync(ResyncReauth)).
+	Dropped []string
+}
 
 // WSHandlers are optional callbacks. They run one at a time on a dedicated goroutine, in
 // frame order, so they may call Subscribe, Auth and the other methods. Keep them quick:
@@ -141,9 +171,13 @@ type WSHandlers struct {
 	OnReconnected func(Welcome)
 	// State may have been missed: refetch anything you keep from private or public channels.
 	OnResync func(ResyncReason)
-	// session.revoked arrived: private channels are dead. The socket stays open and public
-	// channels keep working. Call Auth with a new token to restore private channels.
+	// session.revoked arrived for this connection's own session (current true): private
+	// channels are dead. The socket stays open and public channels keep working. Call Auth with
+	// a new token to restore private channels.
 	OnAuthLost func(Event)
+	// The server ended this connection's private subscriptions: Auth succeeded as another
+	// user, an Auth failed, or this connection's own session was revoked.
+	OnAuthChanged func(AuthChange)
 }
 
 // WSOptions configures a WebSocket.
@@ -221,6 +255,8 @@ type WebSocket struct {
 	welcome        *Welcome
 	channels       []string
 	token          string
+	authUserID     string   // user of the last successful auth on the current connection
+	pendingPrivate []string // dropped by a server sign-out; re-subscribed after the next successful auth
 	pending        map[string]*wsPending
 	nextID         int
 	closedByUser   bool
@@ -431,6 +467,7 @@ func (w *WebSocket) onWelcome(welcome Welcome) {
 	}
 	isReconnect := w.everConnected
 	w.everConnected = true
+	w.authUserID = "" // a new connection starts signed out
 	token := w.token
 	channels := append([]string(nil), w.channels...)
 	books := w.bookList()
@@ -507,6 +544,14 @@ func (w *WebSocket) auth(ctx context.Context, token string) (AuthResult, error) 
 	return AuthResult{UserID: uid}, nil
 }
 
+// HasToken reports whether a session token is kept for automatic re-authentication. A
+// refused token and a revoked session are forgotten.
+func (w *WebSocket) HasToken() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.token != ""
+}
+
 // Ping sends a ping with an id and returns the round-trip time.
 func (w *WebSocket) Ping(ctx context.Context) (time.Duration, error) {
 	start := time.Now()
@@ -536,7 +581,7 @@ func (w *WebSocket) Subscribe(ctx context.Context, channels ...string) (Subscrib
 			fresh = append(fresh, c)
 		}
 	}
-	room := max(0, w.opts.MaxSubscriptions-len(w.channels))
+	room := max(0, w.opts.MaxSubscriptions-len(w.channels)-len(w.pendingPrivate))
 	accepted := fresh[:min(room, len(fresh))]
 	res.Refused = fresh[len(accepted):]
 	w.channels = append(w.channels, accepted...)
@@ -549,6 +594,15 @@ func (w *WebSocket) Subscribe(ctx context.Context, channels ...string) (Subscrib
 		return res, nil
 	}
 	added, err := w.sendSubscribe(ctx, accepted)
+	var we *WSError
+	if errors.As(err, &we) && we.FromServer {
+		// Refused by the server (e.g. UNAUTHENTICATED for a private channel): not held.
+		w.mu.Lock()
+		for _, c := range accepted {
+			w.drop(c)
+		}
+		w.mu.Unlock()
+	}
 	res.Added = added
 	return res, err
 }
@@ -559,6 +613,7 @@ func (w *WebSocket) Unsubscribe(ctx context.Context, channels ...string) error {
 	w.mu.Lock()
 	var held []string
 	for _, c := range uniq(channels) {
+		w.pendingPrivate = remove(w.pendingPrivate, c)
 		if w.holds(c) {
 			held = append(held, c)
 			w.drop(c)
@@ -617,6 +672,7 @@ func (w *WebSocket) Close() error {
 		return nil
 	}
 	w.closedByUser = true
+	w.authUserID = ""
 	if w.stop != nil {
 		close(w.stop)
 		w.stop = nil
@@ -708,15 +764,17 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 		})
 		return
 	case "authenticated":
-		if id != "" {
-			w.settle(id, "auth", frame, nil)
-		}
 		uid, _ := frame["user_id"].(string)
 		w.dispatch(func() {
 			if w.h.OnAuthenticated != nil {
 				w.h.OnAuthenticated(uid)
 			}
 		})
+		// Update the state before Auth returns, and before any later frame.
+		w.onAuthenticated(uid)
+		if id != "" {
+			w.settle(id, "auth", frame, nil)
+		}
 		return
 	case "subscribed", "unsubscribed":
 		channels := stringList(frame["channels"])
@@ -748,6 +806,15 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 		}
 		werr := &WSError{Code: code, Message: msg, FromServer: true}
 		if id != "" {
+			// Any error on an auth frame signs the connection out (an UNAUTHENTICATED error on a
+			// subscribe is only a refused subscribe).
+			w.mu.Lock()
+			p, ok := w.pending[id]
+			isAuth := ok && p.kind == "auth"
+			w.mu.Unlock()
+			if isAuth {
+				w.signedOut(AuthFailed, code)
+			}
 			w.settle(id, "", nil, werr)
 		}
 		w.dispatch(func() {
@@ -791,17 +858,13 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 		book = w.books[symbol]
 		w.mu.Unlock()
 	}
-	if ev.Type == "session.revoked" {
+	// Only this connection's own session signs it out (the server checks current == true
+	// exactly); current false, missing or not a boolean changes nothing.
+	if data, _ := frame["data"].(map[string]any); ev.Type == "session.revoked" && data["current"] == true {
 		w.mu.Lock()
-		w.token = ""
-		kept := w.channels[:0]
-		for _, c := range w.channels {
-			if !PrivateChannels[c] {
-				kept = append(kept, c)
-			}
-		}
-		w.channels = kept
+		w.token = "" // never re-auth with a revoked session
 		w.mu.Unlock()
+		w.signedOut(AuthSessionRevoked, "")
 		w.dispatch(func() {
 			if w.h.OnAuthLost != nil {
 				w.h.OnAuthLost(ev)
@@ -814,6 +877,86 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 		}
 		if w.h.OnEvent != nil {
 			w.h.OnEvent(ev)
+		}
+	})
+}
+
+// dropPrivateLocked moves the held private channels to the pending set and returns them.
+func (w *WebSocket) dropPrivateLocked() []string {
+	dropped := []string{}
+	kept := w.channels[:0]
+	for _, c := range w.channels {
+		if PrivateChannels[c] {
+			dropped = append(dropped, c)
+		} else {
+			kept = append(kept, c)
+		}
+	}
+	w.channels = kept
+	w.pendingPrivate = append(w.pendingPrivate, dropped...)
+	return dropped
+}
+
+// signedOut: the server signed the connection out and ended every private subscription.
+func (w *WebSocket) signedOut(reason AuthChangeReason, code string) {
+	w.mu.Lock()
+	change := AuthChange{Reason: reason, PreviousUserID: w.authUserID, Code: code}
+	w.authUserID = ""
+	change.Dropped = w.dropPrivateLocked()
+	w.mu.Unlock()
+	w.dispatch(func() {
+		if w.h.OnAuthChanged != nil {
+			w.h.OnAuthChanged(change)
+		}
+	})
+}
+
+// onAuthenticated: a successful auth. It detects an account switch, then restores the
+// pending private channels.
+func (w *WebSocket) onAuthenticated(userID string) {
+	w.mu.Lock()
+	previous := w.authUserID
+	w.authUserID = userID
+	var change *AuthChange
+	if previous != "" && userID != previous {
+		change = &AuthChange{Reason: AuthUserChanged, PreviousUserID: previous, UserID: userID, Dropped: w.dropPrivateLocked()}
+	}
+	channels := w.pendingPrivate
+	w.pendingPrivate = nil
+	w.channels = append(w.channels, channels...)
+	w.mu.Unlock()
+	if change != nil {
+		w.dispatch(func() {
+			if w.h.OnAuthChanged != nil {
+				w.h.OnAuthChanged(*change)
+			}
+		})
+	}
+	if len(channels) == 0 {
+		return
+	}
+	// Not on the read loop: the acknowledgement arrives through it.
+	go func() {
+		_, err := w.sendSubscribe(context.Background(), channels)
+		var we *WSError
+		if errors.As(err, &we) && we.FromServer {
+			// Refused by the server (e.g. signed out again meanwhile): back to pending.
+			w.mu.Lock()
+			for _, c := range channels {
+				if w.holds(c) {
+					w.drop(c)
+					w.pendingPrivate = append(w.pendingPrivate, c)
+				}
+			}
+			w.mu.Unlock()
+		}
+		if err != nil {
+			w.emitError(err)
+		}
+	}()
+	w.dispatch(func() {
+		if w.h.OnResync != nil {
+			w.h.OnResync(ResyncReauth)
 		}
 	})
 }
@@ -1026,13 +1169,28 @@ func (w *WebSocket) emitError(err error) {
 	})
 }
 
+// holds reports whether c is held, or pending re-subscription after a sign-out.
 func (w *WebSocket) holds(c string) bool {
 	for _, x := range w.channels {
 		if x == c {
 			return true
 		}
 	}
+	for _, x := range w.pendingPrivate {
+		if x == c {
+			return true
+		}
+	}
 	return false
+}
+
+func remove(list []string, c string) []string {
+	for i, x := range list {
+		if x == c {
+			return append(list[:i], list[i+1:]...)
+		}
+	}
+	return list
 }
 
 func (w *WebSocket) drop(c string) {

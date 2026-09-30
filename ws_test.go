@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,6 +25,7 @@ type mockWS struct {
 	conns     []*websocket.Conn
 	frames    []map[string]any // every client frame, all connections
 	silent    bool             // no welcome, no acks (liveness tests)
+	refuseSub atomic.Bool      // answer subscribe with UNAUTHENTICATED
 	snapshots atomic.Int32
 	seq       atomic.Int64 // sequence of the REST snapshot
 }
@@ -71,6 +74,10 @@ func (m *mockWS) handler(t *testing.T) http.HandlerFunc {
 			id := f["id"]
 			switch f["op"] {
 			case "subscribe":
+				if m.refuseSub.Load() {
+					m.write(c, map[string]any{"type": "error", "code": "UNAUTHENTICATED", "message": "authentication required", "id": id})
+					continue
+				}
 				m.write(c, map[string]any{"type": "subscribed", "channels": f["channels"], "id": id})
 			case "unsubscribe":
 				m.write(c, map[string]any{"type": "unsubscribed", "channels": f["channels"], "id": id})
@@ -351,6 +358,9 @@ func TestWSConformanceFrames(t *testing.T) {
 	ws.mu.Unlock()
 	files, _ := filepath.Glob(filepath.Join(dir, "conformance", "ws", "*.json"))
 	for _, f := range files {
+		if filepath.Base(f) == "private_signout.json" {
+			continue // a script, not a frame (see TestWSPrivateSignoutConformance)
+		}
 		if filepath.Base(f) == "welcome.json" {
 			var wel Welcome
 			readJSON(t, f, &wel)
@@ -385,5 +395,133 @@ func TestWSNotConnected(t *testing.T) {
 	res, err := ws.Subscribe(context.Background(), "ticker:BTC/USDT")
 	if err != nil || len(res.Added) != 0 || len(ws.Channels()) != 1 {
 		t.Fatalf("queued subscribe: %+v %v", res, err)
+	}
+}
+
+func TestWSFailedReauthThenReconnectRestoresPrivateOnNextAuth(t *testing.T) {
+	var mu sync.Mutex
+	var changes []AuthChange
+	var resyncs []ResyncReason
+	ws, m := setupWS(t, WSOptions{Handlers: WSHandlers{
+		OnAuthChanged: func(a AuthChange) { mu.Lock(); changes = append(changes, a); mu.Unlock() },
+		OnResync:      func(r ResyncReason) { mu.Lock(); resyncs = append(resyncs, r); mu.Unlock() },
+	}})
+	ctx := context.Background()
+	if _, err := ws.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Auth(ctx, "good"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Subscribe(ctx, "orders", "ticker:BTC/USDT"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Auth(ctx, "expired"); err == nil {
+		t.Fatal("refused auth succeeded")
+	}
+	if got := ws.Channels(); len(got) != 1 || got[0] != "ticker:BTC/USDT" || ws.HasToken() {
+		t.Fatalf("after failed auth: %v token=%v", got, ws.HasToken())
+	}
+	eventually(t, "auth_changed", func() bool { mu.Lock(); defer mu.Unlock(); return len(changes) == 1 })
+	mu.Lock()
+	c := changes[0]
+	mu.Unlock()
+	if c.Reason != AuthFailed || c.PreviousUserID != "u1" || c.Code != "UNAUTHENTICATED" || len(c.Dropped) != 1 || c.Dropped[0] != "orders" {
+		t.Fatalf("change %+v", c)
+	}
+	// A private subscribe while signed out is not re-sent: it is pending.
+	if res, _ := ws.Subscribe(ctx, "orders"); len(res.AlreadySubscribed) != 1 {
+		t.Fatalf("subscribe while pending: %+v", res)
+	}
+	subsBefore := len(m.sent("subscribe"))
+	_ = m.last().Close(websocket.StatusGoingAway, "restart")
+	eventually(t, "reconnect", func() bool { return m.connCount() == 2 && ws.Connected() && len(m.sent("subscribe")) == subsBefore+1 })
+	if len(m.sent("auth")) != 2 {
+		t.Fatalf("refused token re-sent after reconnect: %d auth frames", len(m.sent("auth")))
+	}
+	if got := m.sent("subscribe")[subsBefore]["channels"]; !reflect.DeepEqual(stringList(got), []string{"ticker:BTC/USDT"}) {
+		t.Fatalf("reconnect subscribe %v", got)
+	}
+	if _, err := ws.Auth(ctx, "good"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "private re-subscribe", func() bool { return len(m.sent("subscribe")) == subsBefore+2 })
+	if got := stringList(m.sent("subscribe")[subsBefore+1]["channels"]); !reflect.DeepEqual(got, []string{"orders"}) {
+		t.Fatalf("private re-subscribe %v", got)
+	}
+	eventually(t, "reauth resync", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Contains(resyncs, ResyncReauth)
+	})
+}
+
+func TestWSSessionRevokedNeedsCurrentTrue(t *testing.T) {
+	ws, m := setupWS(t, WSOptions{})
+	ctx := context.Background()
+	if _, err := ws.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Auth(ctx, "good"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Subscribe(ctx, "account", "orders"); err != nil {
+		t.Fatal(err)
+	}
+	for _, current := range []any{false, "true", nil} {
+		m.push(map[string]any{"type": "session.revoked", "channel": "account", "data": map[string]any{"session_id": nil, "reason": "logout", "current": current}})
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := ws.Ping(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := ws.Channels(); len(got) != 2 || !ws.HasToken() {
+		t.Fatalf("non-current revoke acted: %v token=%v", got, ws.HasToken())
+	}
+}
+
+func TestWSRefusedPrivateResubscribeGoesBackToPending(t *testing.T) {
+	ws, m := setupWS(t, WSOptions{})
+	ctx := context.Background()
+	if _, err := ws.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Auth(ctx, "good"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Subscribe(ctx, "orders"); err != nil {
+		t.Fatal(err)
+	}
+	m.push(map[string]any{"type": "session.revoked", "channel": "account", "data": map[string]any{"session_id": nil, "reason": "logout_all", "current": true}})
+	eventually(t, "privates dropped", func() bool { return len(ws.Channels()) == 0 })
+	m.refuseSub.Store(true)
+	if _, err := ws.Auth(ctx, "good"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "refused re-subscribe", func() bool { return len(m.sent("subscribe")) == 2 })
+	for i := 0; i < 2; i++ {
+		_, _ = ws.Ping(ctx)
+	}
+	eventually(t, "back to pending", func() bool { return len(ws.Channels()) == 0 })
+	m.refuseSub.Store(false)
+	if _, err := ws.Auth(ctx, "good"); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "retry", func() bool { return len(m.sent("subscribe")) == 3 && len(ws.Channels()) == 1 })
+}
+
+func TestWSRefusedSubscribeIsNotHeld(t *testing.T) {
+	ws, m := setupWS(t, WSOptions{})
+	ctx := context.Background()
+	if _, err := ws.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	m.refuseSub.Store(true)
+	if _, err := ws.Subscribe(ctx, "orders"); err == nil {
+		t.Fatal("refused subscribe succeeded")
+	}
+	if got := ws.Channels(); len(got) != 0 {
+		t.Fatalf("refused channel held: %v", got)
 	}
 }
