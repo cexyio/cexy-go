@@ -486,3 +486,111 @@ func TestLiveBalancesDefaultOwnerMismatchNeverMerges(t *testing.T) {
 		t.Fatalf("merged after a mismatch: %d balance calls, %d rows, stale %v", n, len(lb.All()), lb.Stale())
 	}
 }
+
+func TestLiveBalancesReviewFixes(t *testing.T) {
+	t.Run("custom snapshot needs an owner", func(t *testing.T) {
+		ws, m := setupWS(t, WSOptions{})
+		m.ownerID.Store("u1")
+		ctx := context.Background()
+		if _, err := ws.Connect(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ws.Auth(ctx, "good"); err != nil {
+			t.Fatal(err)
+		}
+		_, err := ws.LiveBalances(ctx, LiveBalancesOptions{Snapshot: func(context.Context) ([]Balance, error) { return nil, nil }})
+		var ce *ConfigError
+		if !errors.As(err, &ce) {
+			t.Fatalf("want ConfigError, got %v", err)
+		}
+	})
+	t.Run("no buffering while unverified; Close marks stale; Code", func(t *testing.T) {
+		ws, m := setupWS(t, WSOptions{})
+		ctx := context.Background()
+		if _, err := ws.Connect(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ws.Auth(ctx, "good"); err != nil {
+			t.Fatal(err)
+		}
+		owner := "someone_else"
+		var mu sync.Mutex
+		lb, err := ws.LiveBalances(ctx, LiveBalancesOptions{
+			OwnerID: func(context.Context) (string, error) { mu.Lock(); defer mu.Unlock(); return owner, nil },
+			Snapshot: func(context.Context) ([]Balance, error) {
+				return []Balance{{Asset: "USDT", Available: "5", Locked: "0", Pending: "0", Total: "5", Sequence: 10}}, nil
+			},
+			MinSnapshotInterval: NoMinimum,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lb.Close()
+		eventually(t, "mismatch", func() bool { return lb.LastError() != nil })
+		var mm *AccountMismatchError
+		if !errors.As(lb.LastError(), &mm) || mm.Code() != "ACCOUNT_MISMATCH" {
+			t.Fatalf("last error %v", lb.LastError())
+		}
+		for i := 0; i < 500; i++ {
+			m.push(map[string]any{"type": "balance.updated", "channel": "balances",
+				"data": map[string]any{"asset": "USDT", "available": "9", "locked": "0", "pending": "0", "total": "9", "sequence": 50 + i}})
+		}
+		if _, err := ws.Ping(ctx); err != nil {
+			t.Fatal(err)
+		}
+		lb.mu.Lock()
+		n := len(lb.buffer)
+		lb.mu.Unlock()
+		if n != 0 {
+			t.Fatalf("%d events buffered while unverified", n)
+		}
+		mu.Lock()
+		owner = "u1"
+		mu.Unlock()
+		m.push(map[string]any{"type": "balances.resync", "channel": "balances", "data": map[string]any{}})
+		eventually(t, "snapshot", func() bool { return !lb.Stale() })
+		if b, _ := lb.Get("USDT"); b.Total != "5" || b.Sequence != 10 {
+			t.Fatalf("dropped events applied: %+v", b)
+		}
+		_ = ws.Close()
+		if !lb.Stale() {
+			t.Fatal("not stale after Close")
+		}
+	})
+	t.Run("signed_out payloads", func(t *testing.T) {
+		var mu sync.Mutex
+		var lost []Event
+		var changes []AuthChange
+		ws, m := setupWS(t, WSOptions{Handlers: WSHandlers{
+			OnAuthLost:    func(e Event) { mu.Lock(); lost = append(lost, e); mu.Unlock() },
+			OnAuthChanged: func(c AuthChange) { mu.Lock(); changes = append(changes, c); mu.Unlock() },
+		}})
+		ctx := context.Background()
+		if _, err := ws.Connect(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ws.Auth(ctx, "good"); err != nil {
+			t.Fatal(err)
+		}
+		m.push(map[string]any{"type": "signed_out", "reason": "revoked"})
+		eventually(t, "authLost", func() bool { mu.Lock(); defer mu.Unlock(); return len(lost) == 1 })
+		mu.Lock()
+		got := lost[0]
+		mu.Unlock()
+		var data map[string]any
+		_ = json.Unmarshal(got.Data, &data)
+		if got.Type != "session.revoked" || got.Channel != "account" || data["session_id"] != nil || data["reason"] != "signed_out" || data["current"] != true || len(data) != 3 {
+			t.Fatalf("synthetic authLost %+v %v", got, data)
+		}
+		if _, err := ws.Auth(ctx, "good"); err != nil {
+			t.Fatal(err)
+		}
+		m.push(map[string]any{"type": "signed_out"})
+		eventually(t, "unknown", func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			last := changes[len(changes)-1]
+			return last.Reason == AuthSignedOut && last.Code == "unknown"
+		})
+	})
+}

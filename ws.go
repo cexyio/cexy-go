@@ -752,10 +752,14 @@ func (w *WebSocket) Close() error {
 	}
 	conn := w.conn
 	books := w.bookList()
+	helpers := append([]*LiveBalances(nil), w.liveBalances...)
 	w.teardownLocked(&WSError{Code: "CLOSED", Message: "connection closed by client"})
 	w.mu.Unlock()
 	for _, b := range books {
 		b.markDisconnected()
+	}
+	for _, lb := range helpers {
+		lb.markStale() // no connection: nothing is live any more
 	}
 	if conn != nil {
 		_ = conn.Close(websocket.StatusNormalClosure, "client closing") // best effort, like any close
@@ -886,6 +890,9 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 		// expired, session revoked, or a future reason). Private subscriptions are gone; a fresh
 		// Auth on this socket restores them.
 		raw, _ := frame["reason"].(string)
+		if raw == "" {
+			raw = "unknown"
+		}
 		w.mu.Lock()
 		w.token = ""
 		w.mu.Unlock()

@@ -15,17 +15,19 @@ type LiveBalancesOptions struct {
 	// It must return the balances of the same account the WebSocket is authenticated as.
 	Snapshot func(ctx context.Context) ([]Balance, error)
 	// The user id the snapshot source belongs to, compared with the WebSocket's authenticated user
-	// before every merge. Default: the Client's Account.ID (GET /api/v1/account/id).
+	// at the start and after every account change. Default: the Client's Account.ID (GET /api/v1/account/id).
 	OwnerID func(ctx context.Context) (string, error)
 	// A fixed owner user id instead of OwnerID.
 	AccountID string
-	// Minimum time between successful snapshots (the API key's rate limit is shared). 0 means the
-	// default, 2 s; a negative value means no minimum.
+	// Minimum time between successful snapshots (the API key's rate limit is shared). NOTE: 0
+	// selects the default, 2 s (Go cannot tell unset from zero); use NoMinimum for none.
 	MinSnapshotInterval time.Duration
 	// Retry delay after a failed snapshot or owner lookup. Default 1 s (doubles up to 30 s).
 	RetryDelay time.Duration
 	// Called (on its own goroutine, one at a time) when one asset changes; nil balance: the row
-	// was removed because its total reached 0.
+	// was removed because its total reached 0. Callbacks queue up to 256 deep; while the queue is
+	// full, further notifications are dropped with a warning (the state itself stays correct: read
+	// it with Get and All).
 	OnUpdate func(asset string, b *Balance)
 	// Called after a snapshot was applied.
 	OnSnapshot func(reason string)
@@ -34,11 +36,18 @@ type LiveBalancesOptions struct {
 	OnError func(error)
 }
 
+// NoMinimum, as LiveBalancesOptions.MinSnapshotInterval, disables the minimum time between
+// snapshots (the other SDKs spell this 0).
+const NoMinimum time.Duration = -1
+
 // AccountMismatchError: the snapshot source belongs to another account than the WebSocket session.
 type AccountMismatchError struct {
 	WebSocketUserID string
 	SnapshotUserID  string
 }
+
+// Code returns "ACCOUNT_MISMATCH" (the same code as the other SDKs).
+func (e *AccountMismatchError) Code() string { return "ACCOUNT_MISMATCH" }
 
 func (e *AccountMismatchError) Error() string {
 	return fmt.Sprintf("cexy live balances: [ACCOUNT_MISMATCH] the snapshot source belongs to %s, the WebSocket to %s; not merging",
@@ -63,7 +72,7 @@ type balanceUpdate struct {
 // An event applies only if its data.sequence is greater than the stored one for that asset; a total
 // of 0 removes the row (a snapshot row at or below that sequence cannot bring it back). A new
 // snapshot is taken on a frame gap, balances.resync, CONCURRENT_MODIFICATION, a reconnect and after
-// an account change, never because data.sequence skipped values. Before every merge the snapshot
+// an account change, never because data.sequence skipped values. At the start and after every account change the snapshot
 // source's owner is checked against the WebSocket user.
 type LiveBalances struct {
 	ws    *WebSocket
@@ -86,12 +95,14 @@ type LiveBalances struct {
 	generation   int
 	warnedNoSeq  bool
 	lastErr      error
+	cancelFetch  context.CancelFunc
 	callbacks    chan func()
 }
 
 // LiveBalances subscribes balances and returns a LiveBalances that follows them. Call Auth first.
 func (w *WebSocket) LiveBalances(ctx context.Context, opts LiveBalancesOptions) (*LiveBalances, error) {
 	src, _ := w.opts.snapshots.(*Client)
+	customSnapshot := opts.Snapshot != nil
 	if opts.Snapshot == nil {
 		if src == nil {
 			return nil, &ConfigError{Msg: "LiveBalances needs opts.Snapshot or a WebSocket made by Client.WebSocket"}
@@ -103,7 +114,9 @@ func (w *WebSocket) LiveBalances(ctx context.Context, opts LiveBalancesOptions) 
 		case opts.AccountID != "":
 			fixed := opts.AccountID
 			opts.OwnerID = func(context.Context) (string, error) { return fixed, nil }
-		case src != nil:
+		case src != nil && !customSnapshot:
+			// The REST key's account owns only the REST key's own snapshots: a custom snapshot
+			// source must name its owner.
 			opts.OwnerID = func(ctx context.Context) (string, error) { return src.Account.ID(ctx) }
 		default:
 			return nil, &ConfigError{Msg: "LiveBalances needs opts.OwnerID or opts.AccountID to check the snapshot's account"}
@@ -184,6 +197,10 @@ func (lb *LiveBalances) Close() {
 	}
 	lb.closed = true
 	lb.cancelTimerLocked()
+	if lb.cancelFetch != nil {
+		lb.cancelFetch()
+		lb.cancelFetch = nil
+	}
 	close(lb.callbacks)
 	lb.mu.Unlock()
 	w := lb.ws
@@ -256,8 +273,14 @@ func (lb *LiveBalances) onEvent(raw json.RawMessage) {
 	if lb.closed {
 		return
 	}
-	if lb.fetching || lb.verifiedUser == "" {
+	// Buffered only while a snapshot is in flight (it is applied on top). Without a verified owner
+	// and no fetch (mismatch, retry backoff, signed out), events are dropped: the next snapshot is
+	// complete anyway.
+	if lb.fetching {
 		lb.buffer = append(lb.buffer, d)
+		return
+	}
+	if lb.verifiedUser == "" {
 		return
 	}
 	lb.applyLocked(d, true)
@@ -315,11 +338,15 @@ func (lb *LiveBalances) startFetchLocked(reason string) {
 	lb.fetching = true
 	lb.buffer = nil
 	lb.generation++
-	go lb.fetch(reason, wsUser, lb.generation, lb.verifiedUser != wsUser)
+	ctx, cancel := context.WithCancel(context.Background())
+	if lb.cancelFetch != nil {
+		lb.cancelFetch()
+	}
+	lb.cancelFetch = cancel
+	go lb.fetch(ctx, reason, wsUser, lb.generation, lb.verifiedUser != wsUser)
 }
 
-func (lb *LiveBalances) fetch(reason, wsUser string, gen int, checkOwner bool) {
-	ctx := context.Background()
+func (lb *LiveBalances) fetch(ctx context.Context, reason, wsUser string, gen int, checkOwner bool) {
 	fail := func(err error) {
 		lb.mu.Lock()
 		defer lb.mu.Unlock()

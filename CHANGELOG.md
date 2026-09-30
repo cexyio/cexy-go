@@ -14,9 +14,12 @@ All notable changes to this project are documented here. The format follows
   `balance.updated` events. An event applies only when its `sequence` is greater than the stored
   one (a total of 0 removes the row, and an older snapshot row cannot bring it back); a refetch
   happens on a missed event, `balances.resync`, `CONCURRENT_MODIFICATION`, a reconnect or an account
-  change, at most every `MinSnapshotInterval` (default 2 s; negative: none), with retry backoff.
-  Before every merge the REST key's account (`Account.ID`) must be the WebSocket's user, otherwise
-  nothing is merged (`*AccountMismatchError`). Events without `sequence` (older servers) always
+  change, at most every `MinSnapshotInterval` (default 2 s; 0 selects the default, `NoMinimum` disables it), with retry backoff.
+  At the start and after every account change the REST key's account (`Account.ID`) must be the WebSocket's user, otherwise
+  nothing is merged (`*AccountMismatchError`, `Code()` "ACCOUNT_MISMATCH"). A custom `Snapshot` must
+  name its owner (`OwnerID` or `AccountID`), otherwise `LiveBalances` returns a `*ConfigError`.
+  `Close` cancels an in-flight snapshot. Callback notifications are dropped with a warning while
+  the 256-deep callback queue is full (the state stays correct). Events without `sequence` (older servers) always
   apply and log one warning. `Stale`, `LastError`, `Get`, `All`, `Close`; callbacks `OnUpdate`,
   `OnSnapshot`, `OnError`.
 - WebSocket: frame-sequence tracking on private channels. A gap that is not filled within
@@ -26,8 +29,8 @@ All notable changes to this project are documented here. The format follows
   `ResyncWithdrawalsResync`.
 - WebSocket: the planned `signed_out` server frame is handled as a server sign-out:
   `AuthTokenExpired`, `AuthSessionRevoked` plus `OnAuthLost` (synthetic `session.revoked` event with
-  `data.reason` `"signed_out"`), or `AuthSignedOut` with the raw reason in `Code`. The token is
-  forgotten.
+  `data.reason` `"signed_out"`), or `AuthSignedOut` with the raw reason in `Code` (`"unknown"` when the frame has none). The
+  token is forgotten.
 - `Balance.Sequence`, `WebSocket.UserID`, `WSClock` / `WSOptions.Clock` (test-only time source).
 
 ## [0.1.0-dev.6] (2026-09-30)
