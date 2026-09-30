@@ -399,6 +399,7 @@ func (lb *LiveBalances) fetch(ctx context.Context, reason, wsUser string, gen in
 		if owner != wsUser {
 			lb.rows = map[string]Balance{}
 			lb.tombstones = map[string]int64{}
+			lb.buffer = nil // events that arrived during the owner lookup
 			lb.fetching = false
 			lb.again = ""
 			mismatch := &AccountMismatchError{WebSocketUserID: wsUser, SnapshotUserID: owner}

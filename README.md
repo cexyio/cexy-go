@@ -317,7 +317,9 @@ events (only when their `sequence` is greater than the one it holds; a total of 
 It refetches by itself on a missed event, `balances.resync`, `CONCURRENT_MODIFICATION`, a reconnect
 or an account change, at most every `MinSnapshotInterval` (default 2 s; `cexy.NoMinimum` for none, since 0 selects the default), and
 never because a balance's own sequence skipped values. At the start and after every account change it checks that the REST
-key's account (`Account.ID`) is the WebSocket's authenticated user: otherwise nothing is merged.
+key's account (`Account.ID`) is the WebSocket's authenticated user: otherwise nothing is merged. With your
+own `Snapshot`, also pass its owner (`OwnerID` or `AccountID`); without one, `LiveBalances` returns
+a `*ConfigError`.
 
 ## Security
 

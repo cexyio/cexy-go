@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- `LiveBalances`: events that arrived while the owner lookup was in flight are dropped when the
+  lookup ends in `ACCOUNT_MISMATCH` (they were kept until the next snapshot).
+
 ## [0.1.0-dev.7] (2026-09-30)
 
 ### Added
@@ -18,7 +22,8 @@ All notable changes to this project are documented here. The format follows
   At the start and after every account change the REST key's account (`Account.ID`) must be the WebSocket's user, otherwise
   nothing is merged (`*AccountMismatchError`, `Code()` "ACCOUNT_MISMATCH"). A custom `Snapshot` must
   name its owner (`OwnerID` or `AccountID`), otherwise `LiveBalances` returns a `*ConfigError`.
-  `Close` cancels an in-flight snapshot. Callback notifications are dropped with a warning while
+  `LiveBalances.Close` cancels its in-flight snapshot (`WebSocket.Close` marks helpers stale).
+  Callback notifications are dropped with a warning while
   the 256-deep callback queue is full (the state stays correct). Events without `sequence` (older servers) always
   apply and log one warning. `Stale`, `LastError`, `Get`, `All`, `Close`; callbacks `OnUpdate`,
   `OnSnapshot`, `OnError`.
