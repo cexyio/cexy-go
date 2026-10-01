@@ -85,7 +85,7 @@ func TestSubAccountBalancesPathAuthAndHeld(t *testing.T) {
 	if req.Method != http.MethodGet || req.URL.EscapedPath() != "/api/v1/account/sub-accounts/sub%2F1%20%3Fx/balances" {
 		t.Fatalf("request = %s %s", req.Method, req.URL.EscapedPath())
 	}
-	if req.Header.Get("X-API-Key") != testKey || req.Header.Get("X-API-Secret") == "" {
+	if req.Header.Get("X-API-Key") != testKey || req.Header.Get("X-API-Signature") == "" || req.Header.Get("X-API-Secret") != "" {
 		t.Fatal("credentials not sent")
 	}
 	if req.Header.Get("Idempotency-Key") != "" {

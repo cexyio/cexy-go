@@ -27,10 +27,10 @@ type Options struct {
 	APIKey string
 	// API key secret. Never logged, never put in a URL.
 	APISecret string
-	// How APIKey/APISecret authenticate: "headers" (default, "" too): X-API-Key + X-API-Secret.
-	// "hmac": request signing (accepted by the API since 2026-10-01); the secret never leaves
-	// the process, and a key issued before signing existed fails with KEY_NOT_SIGNABLE (no
-	// fallback).
+	// How APIKey/APISecret authenticate: "hmac" (default, "" too): every private request is
+	// signed and the secret never leaves the process; a key issued before signing existed fails
+	// with KEY_NOT_SIGNABLE (no fallback). "headers": X-API-Key + X-API-Secret, which the API is
+	// switching off (SIGNATURE_REQUIRED); kept only for servers that still accept it.
 	Auth string
 	// A custom credentials scheme. Mutually exclusive with APIKey/APISecret.
 	Authenticator Authenticator
@@ -110,7 +110,7 @@ func New(opts Options) (*Client, error) {
 		return nil, &ConfigError{Msg: `Auth must be "headers" or "hmac"`}
 	}
 	if hasKey {
-		if opts.Auth == "hmac" {
+		if opts.Auth != "headers" {
 			a, err := NewHMACAuthenticator(opts.APIKey, opts.APISecret)
 			if err != nil {
 				return nil, err

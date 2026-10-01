@@ -316,7 +316,7 @@ var ackType = map[string]string{"auth": "authenticated", "auth_key": "authentica
 // for concurrent use.
 //
 // Private channels need Auth with a session access token, or AuthKey with an API key (on a
-// client created with Options.Auth "hmac").
+// client that signs requests: Options.Auth "hmac", the default).
 type WebSocket struct {
 	url  string
 	opts WSOptions

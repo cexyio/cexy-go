@@ -301,22 +301,45 @@ func newSigningClient(t *testing.T, handler func(http.ResponseWriter, *http.Requ
 }
 
 func TestHMACClientOption(t *testing.T) {
-	c, err := New(Options{APIKey: sigTestKey, APISecret: sigTestSecret, Auth: "hmac"})
+	c, err := New(Options{APIKey: sigTestKey, APISecret: sigTestSecret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.t.auth.(*HMACAuthenticator); !ok {
+		t.Fatalf(`the default must be "hmac" (request signing), got %T`, c.t.auth)
+	}
+	c, err = New(Options{APIKey: sigTestKey, APISecret: sigTestSecret, Auth: "hmac"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := c.t.auth.(*HMACAuthenticator); !ok {
 		t.Fatalf("auth %T", c.t.auth)
 	}
-	c, err = New(Options{APIKey: sigTestKey, APISecret: sigTestSecret})
+	c, err = New(Options{APIKey: sigTestKey, APISecret: sigTestSecret, Auth: "headers"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := c.t.auth.(*HMACAuthenticator); ok {
-		t.Fatal(`the default must stay "headers" (switching it to "hmac" is a separate, reviewed change)`)
+	if _, ok := c.t.auth.(*APIKeyAuthenticator); !ok {
+		t.Fatalf(`Auth "headers" must still select the header scheme, got %T`, c.t.auth)
 	}
 	if _, err := New(Options{APIKey: sigTestKey, APISecret: sigTestSecret, Auth: "HMAC"}); err == nil {
 		t.Fatal("unknown Auth accepted")
+	}
+}
+
+func TestSignatureRequiredNamesTheFix(t *testing.T) {
+	var n atomic.Int32
+	c, _, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret, Auth: "headers"}, func(w http.ResponseWriter, r *http.Request) {
+		n.Add(1)
+		writeJSON(w, 400, apiErr("SIGNATURE_REQUIRED", "This API key must sign its requests; sending the secret is no longer accepted.", false))
+	})
+	_, err := c.Account.Balances(context.Background())
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Code != "SIGNATURE_REQUIRED" || ae.Retryable || !strings.Contains(ae.Message, `Auth "hmac"`) {
+		t.Fatalf("got %v", err)
+	}
+	if n.Load() != 1 {
+		t.Fatalf("%d requests: SIGNATURE_REQUIRED must not be retried", n.Load())
 	}
 }
 
@@ -655,8 +678,8 @@ func setupKeyAuthWS(t *testing.T, auth string, opts WSOptions) (*WebSocket, *key
 	return ws, k
 }
 
-func TestWSAuthKeyNeedsHMACClient(t *testing.T) {
-	ws, _ := setupKeyAuthWS(t, "", WSOptions{})
+func TestWSAuthKeyNeedsHMACClient(t *testing.T) { // a client with Auth "headers" cannot sign
+	ws, _ := setupKeyAuthWS(t, "headers", WSOptions{})
 	_, err := ws.AuthKey(context.Background())
 	var ce *ConfigError
 	if !errors.As(err, &ce) {

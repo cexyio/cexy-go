@@ -154,7 +154,7 @@ func TestRedaction(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	auth := c.t.auth.(*APIKeyAuthenticator)
+	auth := c.t.auth.(*HMACAuthenticator) // the default scheme
 	var logs bytes.Buffer
 	slog.New(slog.NewTextHandler(&logs, nil)).Info("x", "client", c, "auth", auth, "err", err)
 	outputs := []string{

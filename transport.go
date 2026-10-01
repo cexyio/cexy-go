@@ -192,6 +192,12 @@ func (t *transport) attempt(ctx context.Context, c call, o callOptions) (*rawRes
 	if err == nil || !errors.As(err, &apiErr) {
 		return res, err
 	}
+	if apiErr.Code == "SIGNATURE_REQUIRED" {
+		e := *apiErr
+		e.Message = `this API key must sign its requests: use Auth "hmac" (the default) instead of "headers"`
+		e.Retryable = false
+		return nil, &e
+	}
 	if apiErr.Code == "KEY_NOT_SIGNABLE" {
 		e := *apiErr
 		e.Message = "create a new API key; keys issued before request signing can't sign"
