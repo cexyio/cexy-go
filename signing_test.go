@@ -385,6 +385,45 @@ func TestSignedRetryUsesFreshNonce(t *testing.T) {
 	}
 }
 
+func TestNonceStoreWarmingWaitsRetryAfterAndKeepsTheOffset(t *testing.T) {
+	s := &signingServer{}
+	var n atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if sr := s.record(r); !sr.valid {
+			writeJSON(w, 401, apiErr("INVALID_SIGNATURE", "bad signature", false))
+			return
+		}
+		if n.Add(1) == 1 {
+			w.Header().Set("Retry-After", "2")
+			writeJSON(w, 503, map[string]any{"error": map[string]any{"code": "SERVICE_UNAVAILABLE", "message": "x",
+				"retryable": true, "details": map[string]any{"reason": "nonce_store_warming"}}})
+			return
+		}
+		writeJSON(w, 200, dataEnv([]any{}))
+	}))
+	t.Cleanup(srv.Close)
+	a, _ := NewHMACAuthenticator(sigTestKey, sigTestSecret)
+	fs := &fakeSleep{now: time.Now()}
+	c, err := New(Options{BaseURL: srv.URL, AllowInsecure: true, DisableRateLimit: true, Authenticator: a,
+		sleep: fs.sleep, now: fs.clock, random: func() float64 { return 0.5 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Account.Balances(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	reqs, waits := s.all(), fs.all()
+	if len(reqs) != 2 || reqs[0].nonce == reqs[1].nonce {
+		t.Fatalf("%d requests, nonces %q %q", len(reqs), reqs[0].nonce, reqs[1].nonce)
+	}
+	if len(waits) != 1 || waits[0] < 2*time.Second || waits[0] > 3*time.Second {
+		t.Fatalf("waits %v, want one Retry-After wait of 2 s (+ jitter)", waits)
+	}
+	if a.ClockOffset() != 0 {
+		t.Fatalf("offset %v: warming must not touch the clock", a.ClockOffset())
+	}
+}
+
 func expiredErr(serverMs int64) map[string]any {
 	return map[string]any{"error": map[string]any{"code": "SIGNATURE_EXPIRED", "message": "timestamp outside the window",
 		"retryable": true, "details": map[string]any{"server_time_ms": serverMs}}}
