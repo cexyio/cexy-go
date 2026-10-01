@@ -413,8 +413,11 @@ func TestNonceStoreWarmingWaitsRetryAfterAndKeepsTheOffset(t *testing.T) {
 		t.Fatal(err)
 	}
 	reqs, waits := s.all(), fs.all()
-	if len(reqs) != 2 || reqs[0].nonce == reqs[1].nonce {
-		t.Fatalf("%d requests, nonces %q %q", len(reqs), reqs[0].nonce, reqs[1].nonce)
+	if len(reqs) != 2 {
+		t.Fatalf("%d requests, want 2", len(reqs))
+	}
+	if reqs[0].nonce == reqs[1].nonce {
+		t.Fatalf("nonce reused on the retry: %q", reqs[0].nonce)
 	}
 	if len(waits) != 1 || waits[0] < 2*time.Second || waits[0] > 3*time.Second {
 		t.Fatalf("waits %v, want one Retry-After wait of 2 s (+ jitter)", waits)
