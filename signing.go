@@ -17,8 +17,8 @@ import (
 	"time"
 )
 
-// SigningScheme is the request-signing scheme, accepted by the API since 2026-10-01. Opt in with
-// Options.Auth "hmac"; the default is still "headers".
+// SigningScheme is the request-signing scheme: the default (Options.Auth "hmac"). The API refuses
+// the old secret header with SIGNATURE_REQUIRED.
 const SigningScheme = "CEXY-HMAC-SHA256-v1"
 
 // MaxClockOffset is the furthest the client clock may be corrected after SIGNATURE_EXPIRED.

@@ -14,7 +14,7 @@ The official Go SDK for the [CEXY.io](https://cexy.io) REST and WebSocket API.
 ## Install
 
 ```bash
-go get github.com/cexyio/cexy-go@v0.1.0-dev.8
+go get github.com/cexyio/cexy-go@v0.1.0-dev.9
 ```
 
 ```go
@@ -275,7 +275,7 @@ What the client does for you:
 
 **Private channels** (`orders`, `balances`, `deposits`, `withdrawals`, `account`) need
 `ws.Auth(ctx, token)` with a session access token (it returns the `user_id` from `authenticated`),
-or `ws.AuthKey(ctx)` with an API key on a client created with `Auth: "hmac"` (see
+or `ws.AuthKey(ctx)` with an API key (see
 [Request signing](#request-signing)). If the session is revoked, the client calls `OnAuthLost`; public
 channels keep working.
 
@@ -300,14 +300,15 @@ with `ResyncBalancesResync`, `ResyncDepositsResync` or `ResyncWithdrawalsResync`
 
 ### Request signing
 
-The API accepts signed requests (since 2026-10-01). Opt in with `Auth: "hmac"`; the default is still
-`"headers"`, which sends the secret in `X-API-Secret` (the API marks that mode `Deprecation: true`):
+Every private request is signed (`Auth: "hmac"`, the default since v0.1.0-dev.9). The API is
+switching off the old mode that sent the secret in `X-API-Secret`, and refuses it with
+`SIGNATURE_REQUIRED`:
 
 ```go
-client, err := cexy.New(cexy.Options{APIKey: key, APISecret: secret, Auth: "hmac"}) // default: "headers"
+client, err := cexy.New(cexy.Options{APIKey: key, APISecret: secret}) // signs requests; same as Auth: "hmac"
 ```
 
-With `Auth: "hmac"` the secret never leaves your process: every private request is signed
+The secret never leaves your process: every private request is signed
 (`X-API-Key`, `X-API-Timestamp`, `X-API-Nonce`, `X-API-Signature`), every retry with a fresh
 timestamp and nonce. A key issued before signing existed fails with `KEY_NOT_SIGNABLE`: create a new
 API key. `ws.AuthKey(ctx)` authenticates a WebSocket with the same key.
@@ -344,7 +345,8 @@ a `*ConfigError`.
 
 - API keys **cannot withdraw or transfer funds**, whatever their scopes.
 - Use a **read-only** key unless you need to trade, and restrict keys to your IPs (`allowed_ips`).
-- Credentials go only in the `X-API-Key` / `X-API-Secret` headers and only on private endpoints; never in URLs.
+- Credentials are sent only on private endpoints and never in URLs: the key id and a signature
+  (`X-API-Key`, `X-API-Timestamp`, `X-API-Nonce`, `X-API-Signature`). The secret itself is never sent.
 - The SDK **never follows HTTP redirects**, so credentials and orders are never re-sent to another URL.
   A 3xx response becomes an `*APIError` with code `UNEXPECTED_REDIRECT` (`errors.Is(err,
   cexy.ErrUnexpectedRedirect)`); it is not retried. The SDK uses its own copy of `Options.HTTPClient` and
