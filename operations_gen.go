@@ -128,6 +128,10 @@ const (
 	CodeFreshTwoFactorRequired ErrorCode = "FRESH_TWO_FACTOR_REQUIRED"
 	CodeForbidden              ErrorCode = "FORBIDDEN"
 	CodeAPIKeyNotAllowed       ErrorCode = "API_KEY_NOT_ALLOWED"
+	CodeKeyNotSignable         ErrorCode = "KEY_NOT_SIGNABLE"
+	CodeSignatureExpired       ErrorCode = "SIGNATURE_EXPIRED"
+	CodeNonceReused            ErrorCode = "NONCE_REUSED"
+	CodeSignatureRequired      ErrorCode = "SIGNATURE_REQUIRED"
 	CodeFuturesRestricted      ErrorCode = "FUTURES_RESTRICTED"
 	CodeAccountFrozen          ErrorCode = "ACCOUNT_FROZEN"
 	CodeAccountOnHold          ErrorCode = "ACCOUNT_ON_HOLD"
@@ -176,6 +180,10 @@ var knownErrorCodes = map[ErrorCode]bool{
 	CodeFreshTwoFactorRequired: true,
 	CodeForbidden:              true,
 	CodeAPIKeyNotAllowed:       true,
+	CodeKeyNotSignable:         true,
+	CodeSignatureExpired:       true,
+	CodeNonceReused:            true,
+	CodeSignatureRequired:      true,
 	CodeFuturesRestricted:      true,
 	CodeAccountFrozen:          true,
 	CodeAccountOnHold:          true,

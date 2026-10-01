@@ -17,8 +17,8 @@ import (
 	"time"
 )
 
-// SigningScheme is the request-signing scheme (PLANNED: the API does not accept signed requests
-// yet; keep the default Options.Auth until it does).
+// SigningScheme is the request-signing scheme, accepted by the API since 2026-10-01. Opt in with
+// Options.Auth "hmac"; the default is still "headers".
 const SigningScheme = "CEXY-HMAC-SHA256-v1"
 
 // MaxClockOffset is the furthest the client clock may be corrected after SIGNATURE_EXPIRED.
@@ -135,7 +135,7 @@ func encodeQuery(v url.Values) string {
 	return strings.Join(parts, "&")
 }
 
-// HMACAuthenticator signs every private request (PLANNED scheme, see SigningScheme). Only
+// HMACAuthenticator signs every private request (see SigningScheme). Only
 // X-API-Key, X-API-Timestamp, X-API-Nonce and X-API-Signature are sent: the secret never leaves
 // the process. Authenticate runs once per attempt, so every retry is signed with a fresh
 // timestamp and nonce. The HMAC key is the UTF-8 bytes of the secret string as issued.

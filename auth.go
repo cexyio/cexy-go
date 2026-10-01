@@ -22,7 +22,7 @@ type Authenticator interface {
 }
 
 // APIKeyAuthenticator is today's scheme: X-API-Key and X-API-Secret headers on every private
-// request. HMAC request signing is planned before 1.0 and will be another Authenticator.
+// request (the default). HMACAuthenticator (Options.Auth "hmac") is the request-signing scheme.
 //
 // Its String, GoString and LogValue methods never reveal the secret.
 type APIKeyAuthenticator struct {

@@ -313,7 +313,7 @@ func TestHMACClientOption(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, ok := c.t.auth.(*HMACAuthenticator); ok {
-		t.Fatal(`the default must stay "headers" until the API accepts signed requests`)
+		t.Fatal(`the default must stay "headers" (switching it to "hmac" is a separate, reviewed change)`)
 	}
 	if _, err := New(Options{APIKey: sigTestKey, APISecret: sigTestSecret, Auth: "HMAC"}); err == nil {
 		t.Fatal("unknown Auth accepted")

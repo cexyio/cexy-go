@@ -7,7 +7,10 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
-- Request signing, **planned** (the API does not accept it yet; the default is unchanged):
+- Error codes from the live API: `KEY_NOT_SIGNABLE`, `SIGNATURE_EXPIRED`, `NONCE_REUSED` and
+  `SIGNATURE_REQUIRED` (`Code…` constants). `SIGNATURE_REQUIRED` is reserved: the API will return it
+  (400, not retryable) once header mode is switched off; switch to `hmac` before then.
+- Request signing, accepted by the API since 2026-10-01 (opt-in; the default is unchanged):
   `cexy.New(cexy.Options{APIKey: k, APISecret: s, Auth: "hmac"})` signs every private request
   (`CEXY-HMAC-SHA256-v1`: `X-API-Key`, `X-API-Timestamp`, `X-API-Nonce`, `X-API-Signature`) instead
   of sending `X-API-Secret`. Every attempt, retries included, is signed with a fresh timestamp and
@@ -16,7 +19,7 @@ All notable changes to this project are documented here. The format follows
   no fallback to `X-API-Secret`. Checked against the spec's signing vectors and a test server
   that verifies every signature from the raw request it received. `HMACAuthenticator` and
   `NewHMACAuthenticator` are exported for custom setups.
-- `WebSocket.AuthKey`, **planned**: authenticates with the client's API key by signing the
+- `WebSocket.AuthKey`: authenticates with the client's API key by signing the
   server's single-use challenge. It re-signs the new challenge after each reconnect, stops
   automatic key re-auth after a refused key, and reports `AuthKeyRevoked` / `AuthKeyExpired`
   sign-outs. `Client.WebSocket` sets `WSOptions.KeySigner` when the client uses `Auth: "hmac"`.
