@@ -27,8 +27,12 @@ type Options struct {
 	APIKey string
 	// API key secret. Never logged, never put in a URL.
 	APISecret string
-	// A custom credentials scheme (for example request signing once the API supports it).
-	// Mutually exclusive with APIKey/APISecret.
+	// How APIKey/APISecret authenticate: "headers" (default, "" too): X-API-Key + X-API-Secret.
+	// "hmac": request signing (PLANNED: the API does not accept it yet); the secret never leaves
+	// the process, and a key issued before signing existed fails with KEY_NOT_SIGNABLE (no
+	// fallback).
+	Auth string
+	// A custom credentials scheme. Mutually exclusive with APIKey/APISecret.
 	Authenticator Authenticator
 	// Default DefaultBaseURL. Must be https:// (see AllowInsecure).
 	BaseURL string
@@ -100,12 +104,25 @@ func New(opts Options) (*Client, error) {
 		return nil, &ConfigError{Msg: "pass either APIKey/APISecret or Authenticator, not both"}
 	}
 	auth := opts.Authenticator
+	switch opts.Auth {
+	case "", "headers", "hmac":
+	default:
+		return nil, &ConfigError{Msg: `Auth must be "headers" or "hmac"`}
+	}
 	if hasKey {
-		a, err := NewAPIKeyAuthenticator(opts.APIKey, opts.APISecret)
-		if err != nil {
-			return nil, err
+		if opts.Auth == "hmac" {
+			a, err := NewHMACAuthenticator(opts.APIKey, opts.APISecret)
+			if err != nil {
+				return nil, err
+			}
+			auth = a
+		} else {
+			a, err := NewAPIKeyAuthenticator(opts.APIKey, opts.APISecret)
+			if err != nil {
+				return nil, err
+			}
+			auth = a
 		}
-		auth = a
 	}
 
 	base := strings.TrimRight(opts.BaseURL, "/")

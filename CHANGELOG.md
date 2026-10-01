@@ -7,8 +7,29 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Request signing, **planned** (the API does not accept it yet; the default is unchanged):
+  `cexy.New(cexy.Options{APIKey: k, APISecret: s, Auth: "hmac"})` signs every private request
+  (`CEXY-HMAC-SHA256-v1`: `X-API-Key`, `X-API-Timestamp`, `X-API-Nonce`, `X-API-Signature`) instead
+  of sending `X-API-Secret`. Every attempt, retries included, is signed with a fresh timestamp and
+  nonce. After `SIGNATURE_EXPIRED` the client adopts the server clock (at most 1 h away) and resends
+  once. `KEY_NOT_SIGNABLE` (a key issued before signing) is an error that names the fix; there is
+  no fallback to `X-API-Secret`. Checked against the spec's signing vectors and a test server
+  that verifies every signature from the raw request it received. `HMACAuthenticator` and
+  `NewHMACAuthenticator` are exported for custom setups.
+- `WebSocket.AuthKey`, **planned**: authenticates with the client's API key by signing the
+  server's single-use challenge. It re-signs the new challenge after each reconnect, stops
+  automatic key re-auth after a refused key, and reports `AuthKeyRevoked` / `AuthKeyExpired`
+  sign-outs. `Client.WebSocket` sets `WSOptions.KeySigner` when the client uses `Auth: "hmac"`.
+  `AuthResult.Auth` says how the connection is authenticated; `Welcome.Challenge` is the challenge.
+  A signature that finishes after the connection changed is dropped (`STALE_CHALLENGE`); the
+  new connection signs its own challenge.
 - `NoReorderWindow`: set `WSOptions.ReorderWindow` to it to report private sequence gaps at once
   (0 still selects the 250 ms default).
+
+### Changed
+- Path values are encoded per RFC 3986 with uppercase hex (a `+` is sent as `%2B`, and `:@!$&'()*,;=`
+  are encoded too). The server decodes both forms the same way; this makes the signed request
+  exactly the sent one.
 
 ### Fixed
 - `LiveBalances`: events that arrived while the owner lookup was in flight are dropped when the
