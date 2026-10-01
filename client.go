@@ -28,7 +28,7 @@ type Options struct {
 	// API key secret. Never logged, never put in a URL.
 	APISecret string
 	// How APIKey/APISecret authenticate: "headers" (default, "" too): X-API-Key + X-API-Secret.
-	// "hmac": request signing (PLANNED: the API does not accept it yet); the secret never leaves
+	// "hmac": request signing (accepted by the API since 2026-10-01); the secret never leaves
 	// the process, and a key issued before signing existed fails with KEY_NOT_SIGNABLE (no
 	// fallback).
 	Auth string

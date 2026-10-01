@@ -55,7 +55,7 @@ type Welcome struct {
 	HeartbeatIntervalSeconds int    `json:"heartbeat_interval_seconds"`
 	MaxSubscriptions         int    `json:"max_subscriptions"`
 	ConnectionID             string `json:"connection_id"`
-	// Single-use challenge for AuthKey (planned API-key authentication).
+	// Single-use challenge for AuthKey (API-key authentication).
 	Challenge string `json:"challenge,omitempty"`
 }
 
@@ -188,9 +188,9 @@ const (
 	// AuthTokenExpired: the signed_out frame with reason "expired". Re-send Auth on every token
 	// refresh to avoid it.
 	AuthTokenExpired AuthChangeReason = "token_expired"
-	// AuthKeyRevoked: the API key was revoked or deleted (planned key authentication).
+	// AuthKeyRevoked: the API key was revoked or deleted (key authentication).
 	AuthKeyRevoked AuthChangeReason = "key_revoked"
-	// AuthKeyExpired: the API key expired (planned key authentication).
+	// AuthKeyExpired: the API key expired (key authentication).
 	AuthKeyExpired AuthChangeReason = "key_expired"
 	// AuthSignedOut: a server sign-out with a reason this SDK does not know (raw value in Code).
 	// The set of reasons may grow.
@@ -285,7 +285,7 @@ type WSOptions struct {
 	ReorderWindow time.Duration
 	// TEST-ONLY: see WSClock.
 	Clock WSClock
-	// Signs AuthKey challenges (planned API-key authentication). Client.WebSocket sets it when
+	// Signs AuthKey challenges (API-key authentication). Client.WebSocket sets it when
 	// the client uses Auth "hmac".
 	KeySigner WSKeySigner
 
@@ -315,8 +315,8 @@ var ackType = map[string]string{"auth": "authenticated", "auth_key": "authentica
 // limits, automatic reconnect with re-auth and re-subscribe, and live order books. It is safe
 // for concurrent use.
 //
-// API-key authentication on the WebSocket is not available yet: Auth takes a session access
-// token. Programs holding only an API key get public channels and poll REST for private state.
+// Private channels need Auth with a session access token, or AuthKey with an API key (on a
+// client created with Options.Auth "hmac").
 type WebSocket struct {
 	url  string
 	opts WSOptions
@@ -630,7 +630,7 @@ func (w *WebSocket) Auth(ctx context.Context, token string) (AuthResult, error) 
 	return w.auth(ctx, token)
 }
 
-// AuthKey authenticates with the client's API key (PLANNED: the server does not accept it yet).
+// AuthKey authenticates with the client's API key.
 // It signs the server's single-use challenge; the secret never leaves the process. After a
 // reconnect it signs the new connection's challenge automatically. A refused auth_key stops the
 // automatic re-auth (the server closes the socket after 5 failures). It needs WSOptions.KeySigner
