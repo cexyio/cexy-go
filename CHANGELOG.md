@@ -37,18 +37,30 @@ All notable changes to this project are documented here. The format follows
   (`WebSocket.PendingChannels`) until `Auth` or `AuthKey` succeeds.
 - `futures.resync` goes to `OnEvent` and the new `OnFuturesResync(channel)` handler. On
   `futures.account` the client also sends unsubscribe then subscribe (the server's poller stopped);
-  a refusal is reported and the channel is no longer held. Refused futures subscribes are not
-  retried, also not on reconnect.
+  a refusal is reported and the channel is no longer held (`UNAUTHENTICATED`: pending until the
+  next auth).
+- `SubscribeResult.RefusedByServer`: the channels the server refused, each with its error frame
+  (`SubscribeRefusal`).
 
 ### Changed
-- `PingInterval` is capped at 60 s (the server closes connections silent for 90 s).
+- `PingInterval` above 60 s is a `*ConfigError` when the WebSocket is created (the server closes
+  connections silent for 90 s). The default stays 30 s.
+- `Subscribe` returns an error only when every channel sent was refused (the first refusal) or no
+  answer came; a partly refused subscribe returns the refused channels in `RefusedByServer` and no
+  error. No acknowledgement within `AckTimeout` is now a `TIMEOUT` error (it used to count as
+  "nothing new"); the channels stay held.
+- Automatic re-subscribes (after a reconnect or a re-auth) follow one rule for spot and futures
+  channels: a private channel refused with `UNAUTHENTICATED` goes back to pending until the next
+  successful auth; any other refusal drops the channel. Each refusal is reported to `OnError` as a
+  `*SubscribeRefusal`. Refused channels used to stay held (reconnect) or all go back to pending
+  (re-auth).
 
 ### Fixed
 - A WebSocket subscribe with several channels that the server partly refuses: the server sends an
   error frame per refused channel before its single `subscribed` ack (and no ack when it accepted
-  nothing). `Subscribe` now waits for the ack, returns the accepted channels in `Added` with the
-  first refusal as the error, and keeps holding the accepted ones. It used to fail on the first
-  error frame and drop every channel of the request.
+  nothing). `Subscribe` now waits for the ack, returns the accepted channels in `Added` and the
+  refused ones in `RefusedByServer`, and keeps holding the accepted ones. It used to fail on the
+  first error frame and drop every channel of the request.
 
 ## [0.1.0-dev.9] (2026-10-01)
 

@@ -285,7 +285,7 @@ func TestWSReconnectRestoresAuthAndChannels(t *testing.T) {
 func TestWSLivenessTimeoutReconnects(t *testing.T) {
 	var closes []CloseInfo
 	var mu sync.Mutex
-	ws, m := setupWS(t, WSOptions{LivenessTimeout: 150 * time.Millisecond, PingInterval: time.Hour,
+	ws, m := setupWS(t, WSOptions{LivenessTimeout: 150 * time.Millisecond, PingInterval: maxPingInterval,
 		Handlers: WSHandlers{OnClose: func(ci CloseInfo) { mu.Lock(); closes = append(closes, ci); mu.Unlock() }}})
 	if _, err := ws.Connect(context.Background()); err != nil {
 		t.Fatal(err)

@@ -399,14 +399,23 @@ and subscribed once the connection is authenticated.
 that channel may have been missed, refetch it over REST. On `futures.account` the server's poller
 has stopped, so the client also unsubscribes and subscribes again by itself; if the server refuses
 (for example `NOT_FOUND` "No futures account"), the error is reported (`OnServerError`, `OnError`)
-and the channel is no longer held.
+and the channel is no longer held (an `UNAUTHENTICATED` refusal keeps it pending until the next
+auth).
 
 A refused futures subscribe (`RATE_LIMITED`, `NOT_FOUND`, `VALIDATION_FAILED`,
 `SERVICE_UNAVAILABLE`) is returned by `Subscribe` and is not retried. WebSocket error frames carry
-no retry hint: wait yourself (the server means 60 s) before trying again. When a subscribe with
-several channels is partly refused, `SubscribeResult.Added` lists the channels the server accepted
-and the error is the first refusal; only the accepted channels are held. The client pings at least
-every 60 s (`PingInterval` is capped there): the server closes connections silent for 90 s.
+no retry hint: wait yourself (the server means 60 s) before trying again.
+
+Subscribe refusals work the same for every channel. `SubscribeResult.Added` lists the channels the
+server accepted and `SubscribeResult.RefusedByServer` the refused ones, each with its error frame;
+only the accepted channels are held. `Subscribe` returns an error only when every channel sent was
+refused, or when no answer came (`TIMEOUT`, a dropped connection). When the client re-subscribes by
+itself (after a reconnect or a re-auth), a private channel refused with `UNAUTHENTICATED` waits for
+the next successful auth (`ws.PendingChannels()`); any other refusal drops the channel. Each is
+reported to `OnError` as a `*cexy.SubscribeRefusal` (`errors.As` also finds its `*cexy.WSError`).
+
+The client pings at least every 60 s: the server closes connections silent for 90 s. A
+`PingInterval` above 60 s is a `*cexy.ConfigError` from `NewWebSocket` / `Client.WebSocket`.
 
 ### Live balances
 

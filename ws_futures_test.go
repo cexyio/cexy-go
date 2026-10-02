@@ -56,6 +56,7 @@ type futuresWSRun struct {
 	events  []Event
 	resyncs []string
 	errors  []string
+	errs    []error
 }
 
 func newFuturesWSRun(t *testing.T) *futuresWSRun {
@@ -77,6 +78,7 @@ func newFuturesWSRun(t *testing.T) *futuresWSRun {
 				r.mu.Unlock()
 			},
 			OnServerError: func(e *WSError) { r.mu.Lock(); r.errors = append(r.errors, e.Code); r.mu.Unlock() },
+			OnError:       func(e error) { r.mu.Lock(); r.errs = append(r.errs, e); r.mu.Unlock() },
 		},
 	})
 	if err != nil {
@@ -396,9 +398,11 @@ func TestWSSubscribePartlyRefused(t *testing.T) {
 	r.s.write(map[string]any{"type": "error", "code": "NOT_FOUND", "message": "Futures market not found", "id": id})
 	r.s.write(map[string]any{"type": "subscribed", "channels": []string{"futures.trades:BTC", "futures.mids"}, "id": id})
 	got := <-done
-	var we *WSError
-	if !errors.As(got.err, &we) || we.Code != "NOT_FOUND" || !we.FromServer {
+	if got.err != nil { // partly refused: not an error
 		t.Fatalf("err %v", got.err)
+	}
+	if rf := got.res.RefusedByServer; len(rf) != 1 || rf[0].Channel != "futures.trades:XYZ" || rf[0].Err.Code != "NOT_FOUND" || !rf[0].Err.FromServer {
+		t.Fatalf("refused %+v", rf)
 	}
 	if !slices.Equal(got.res.Added, []string{"futures.trades:BTC", "futures.mids"}) {
 		t.Fatalf("added %v", got.res.Added)
@@ -414,7 +418,9 @@ func TestWSSubscribePartlyRefused(t *testing.T) {
 		r.s.write(map[string]any{"type": "error", "code": "RATE_LIMITED", "message": "Too many new futures market subscriptions.", "id": id})
 	}
 	got = <-done
-	if !errors.As(got.err, &we) || we.Code != "RATE_LIMITED" || len(got.res.Added) != 0 || time.Since(start) > time.Second {
+	var we *WSError
+	if !errors.As(got.err, &we) || we.Code != "RATE_LIMITED" || len(got.res.Added) != 0 || len(got.res.RefusedByServer) != 2 ||
+		time.Since(start) > time.Second {
 		t.Fatalf("%+v %v after %s", got.res, got.err, time.Since(start))
 	}
 	if held := sortedStrings(r.ws.Channels()); !slices.Equal(held, []string{"futures.mids", "futures.trades:BTC"}) {
@@ -426,16 +432,131 @@ func TestWSSubscribePartlyRefused(t *testing.T) {
 	}
 }
 
-func TestWSPingIntervalCapped(t *testing.T) {
+func TestWSPingIntervalAbove60sRefused(t *testing.T) {
 	spec := readFuturesWSSpec(t)
 	limit := time.Duration(spec.PingMax) * time.Second
-	for _, in := range []time.Duration{0, 45 * time.Second, 5 * time.Minute} {
+	for _, in := range []time.Duration{0, 45 * time.Second, limit} {
 		ws, err := NewWebSocket(WSOptions{PingInterval: in})
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("%s: %v", in, err)
 		}
-		if ws.opts.PingInterval <= 0 || ws.opts.PingInterval > limit {
-			t.Fatalf("PingInterval %s from %s", ws.opts.PingInterval, in)
+		if want := cmpOr(in, 30*time.Second); ws.opts.PingInterval != want {
+			t.Fatalf("PingInterval %s from %s, want %s", ws.opts.PingInterval, in, want)
 		}
+	}
+	for _, in := range []time.Duration{limit + time.Millisecond, 5 * time.Minute} {
+		var ce *ConfigError
+		if _, err := NewWebSocket(WSOptions{PingInterval: in}); !errors.As(err, &ce) {
+			t.Fatalf("%s: err %v, want a ConfigError", in, err)
+		}
+	}
+}
+
+func cmpOr(d, def time.Duration) time.Duration {
+	if d == 0 {
+		return def
+	}
+	return d
+}
+
+func refusalChannels(errs []error) []string {
+	out := []string{}
+	for _, e := range errs {
+		var r *SubscribeRefusal
+		if errors.As(e, &r) {
+			out = append(out, r.Channel+" "+r.Err.Code)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// Re-subscribe after a re-auth: a private channel refused with UNAUTHENTICATED goes back to
+// pending; any other refusal drops the channel. Both are reported.
+func TestWSResubscribeAfterReauthRefused(t *testing.T) {
+	r := newFuturesWSRun(t)
+	ctx := context.Background()
+	reply := func(op string, frame map[string]any) {
+		reqs := r.s.requests()
+		frame["id"] = reqs[len(reqs)-1]["id"]
+		if reqs[len(reqs)-1]["op"] != op {
+			t.Fatalf("last request %v, want %s", reqs[len(reqs)-1], op)
+		}
+		r.s.write(frame)
+	}
+	go func() { _, _ = r.ws.AuthKey(ctx) }()
+	eventually(t, "auth_key", func() bool { return len(r.s.requests()) == 1 })
+	reply("auth_key", map[string]any{"type": "authenticated", "user_id": "u1", "auth": "api_key", "challenge": "ch2"})
+	r.settle()
+	all := []string{"orders", FuturesAccountChannel, "futures.trades:BTC"}
+	go func() { _, _ = r.ws.Subscribe(ctx, all...) }()
+	eventually(t, "subscribe", func() bool { return len(r.s.requests()) == 2 })
+	reply("subscribe", map[string]any{"type": "subscribed", "channels": all})
+	r.settle()
+
+	r.s.write(map[string]any{"type": "signed_out", "reason": "expired"})
+	r.settle()
+	if got := sortedStrings(r.ws.PendingChannels()); !slices.Equal(got, []string{FuturesAccountChannel, "orders"}) {
+		t.Fatalf("pending %v", got)
+	}
+	go func() { _, _ = r.ws.AuthKey(ctx) }()
+	eventually(t, "auth_key 2", func() bool { return len(r.s.requests()) == 3 })
+	reply("auth_key", map[string]any{"type": "authenticated", "user_id": "u1", "auth": "api_key"})
+	eventually(t, "re-subscribe", func() bool { return len(r.s.requests()) == 4 })
+	sub := r.s.requests()[3]
+	if sub["op"] != "subscribe" || !slices.Equal(sortedStrings(sub["channels"]), []string{FuturesAccountChannel, "orders"}) {
+		t.Fatalf("re-subscribe %v", sub)
+	}
+	// One error per channel, in the order sent; nothing accepted, so no ack.
+	codes := map[string]string{"orders": "UNAUTHENTICATED", FuturesAccountChannel: "NOT_FOUND"}
+	for _, c := range stringList(sub["channels"]) {
+		r.s.write(map[string]any{"type": "error", "code": codes[c], "message": "refused", "id": sub["id"]})
+	}
+	eventually(t, "refusals reported", func() bool {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return len(refusalChannels(r.errs)) == 2
+	})
+	r.mu.Lock()
+	got := refusalChannels(r.errs)
+	r.mu.Unlock()
+	if !slices.Equal(got, []string{"futures.account NOT_FOUND", "orders UNAUTHENTICATED"}) {
+		t.Fatalf("reported %v", got)
+	}
+	if p := r.ws.PendingChannels(); !slices.Equal(p, []string{"orders"}) {
+		t.Fatalf("pending %v", p)
+	}
+	if held := r.ws.Channels(); !slices.Equal(held, []string{"futures.trades:BTC"}) {
+		t.Fatalf("held %v", held)
+	}
+}
+
+// Re-subscribe after a reconnect: the same rule, for spot and futures channels.
+func TestWSResubscribeAfterReconnectRefused(t *testing.T) {
+	var mu sync.Mutex
+	var errs []error
+	ws, m := setupWS(t, WSOptions{Handlers: WSHandlers{OnError: func(e error) { mu.Lock(); errs = append(errs, e); mu.Unlock() }}})
+	ctx := context.Background()
+	if _, err := ws.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Auth(ctx, "good"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.Subscribe(ctx, "orders", "ticker:BTC/USDT", FuturesMidsChannel); err != nil {
+		t.Fatal(err)
+	}
+	m.refuseSub.Store(true) // one UNAUTHENTICATED error per subscribe, and no ack
+	m.last().CloseNow()
+	eventually(t, "refusals reported", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(refusalChannels(errs)) == 3
+	})
+	if p := ws.PendingChannels(); !slices.Equal(p, []string{"orders"}) {
+		t.Fatalf("pending %v", p)
+	}
+	if held := ws.Channels(); len(held) != 0 {
+		t.Fatalf("held %v", held)
 	}
 }

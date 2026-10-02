@@ -176,14 +176,5 @@ func (w *WebSocket) resubscribeFuturesAccount() {
 		w.emitError(err)
 		return
 	}
-	ack, err := w.wait(ctx, sub, false)
-	if refusedByServer(err) && !slices.Contains(subscribed(ack), FuturesAccountChannel) {
-		w.mu.Lock()
-		w.drop(FuturesAccountChannel)
-		w.pendingPrivate = remove(w.pendingPrivate, FuturesAccountChannel)
-		w.mu.Unlock()
-	}
-	if err != nil {
-		w.emitError(err)
-	}
+	w.resubscribed(subscribeResult(ch, w.waitAck(ctx, sub, true)))
 }
