@@ -169,6 +169,21 @@ type CancelFailure struct {
 	OrderID string `json:"order_id"`
 }
 
+// FuturesCandle: One candle.
+type FuturesCandle struct {
+	Close Amount `json:"close"`
+	// Close time, unix milliseconds.
+	CloseTime int64  `json:"close_time"`
+	High      Amount `json:"high"`
+	Low       Amount `json:"low"`
+	Open      Amount `json:"open"`
+	// Open time, unix milliseconds.
+	OpenTime int64 `json:"open_time"`
+	// Number of trades.
+	Trades int64  `json:"trades"`
+	Volume Amount `json:"volume"`
+}
+
 // CandleInterval: Candle/kline intervals for market data.
 //
 // The type is open: values added to the API later decode without error.
@@ -331,6 +346,27 @@ type FeeSchedule struct {
 	Tier int `json:"tier"`
 }
 
+// FuturesFill: One fill.
+type FuturesFill struct {
+	ClosedPnl Amount `json:"closed_pnl"`
+	// Coin.
+	Coin string `json:"coin"`
+	// The provider's description of the fill's effect (`Open Long`, `Close Short`, ...).
+	Direction string `json:"direction"`
+	// Our id for it.
+	ID string `json:"id"`
+	// Our id for its order.
+	OrderID string `json:"order_id"`
+	Price   Amount `json:"price"`
+	// `buy` or `sell`.
+	Side string `json:"side"`
+	Size Amount `json:"size"`
+	// Whether this fill took liquidity.
+	Taker bool `json:"taker"`
+	// When, unix milliseconds.
+	Time int64 `json:"time"`
+}
+
 // Fill: One of the caller's executions.
 type Fill struct {
 	Fee Amount `json:"fee"`
@@ -349,6 +385,117 @@ type Fill struct {
 	Timestamp time.Time `json:"timestamp"`
 	// Trade id.
 	TradeID string `json:"trade_id"`
+}
+
+// Funding: One funding payment.
+type Funding struct {
+	Amount Amount `json:"amount"`
+	// Coin.
+	Coin         string `json:"coin"`
+	PositionSize Amount `json:"position_size"`
+	Rate         Amount `json:"rate"`
+	// When, unix milliseconds.
+	Time int64 `json:"time"`
+}
+
+// FuturesBook: A futures market's book.
+type FuturesBook struct {
+	// When the provider last sent it.
+	AsOf time.Time `json:"as_of"`
+	// Asks, best first.
+	Asks []Level `json:"asks"`
+	// Bids, best first.
+	Bids []Level `json:"bids"`
+	// Coin.
+	Coin string `json:"coin"`
+	// The live feed is not healthy: the book may be out of date.
+	Stale bool `json:"stale"`
+}
+
+// FuturesCandles: A futures market's candles.
+type FuturesCandles struct {
+	// When read.
+	AsOf time.Time `json:"as_of"`
+	// Candles, oldest first.
+	Candles []FuturesCandle `json:"candles"`
+	// Coin.
+	Coin string `json:"coin"`
+	// Interval.
+	Interval string `json:"interval"`
+	// Older than it should be.
+	Stale bool `json:"stale"`
+}
+
+// FuturesFills: A page of the account's fills.
+type FuturesFills struct {
+	// Newest first; fills sharing a millisecond in a fixed order. A page may be short of 100 and still be followed by more.
+	Fills []FuturesFill `json:"fills"`
+	// Whether the account has a futures account.
+	HasAccount bool `json:"has_account"`
+	// Pass as `cursor` for older fills, exactly as given; `null` at the end (30 days back). Opaque: it may carry more than a time.
+	NextCursor *string `json:"next_cursor,omitempty"`
+}
+
+// FuturesFunding: A page of the account's funding payments.
+type FuturesFunding struct {
+	// Newest first.
+	Funding []Funding `json:"funding"`
+	// Whether the account has a futures account.
+	HasAccount bool `json:"has_account"`
+	// Pass as `cursor` for older payments, exactly as given; `null` at the end (30 days back). Opaque.
+	NextCursor *string `json:"next_cursor,omitempty"`
+}
+
+// FuturesMarket: One futures market.
+type FuturesMarket struct {
+	// When this data was read.
+	AsOf   time.Time  `json:"as_of"`
+	Market PerpMarket `json:"market"`
+	// Older than it should be.
+	Stale bool `json:"stale"`
+}
+
+// FuturesMarkets: Every listed futures market.
+type FuturesMarkets struct {
+	// When this data was read from the futures provider.
+	AsOf time.Time `json:"as_of"`
+	// The markets, in the provider's order. Delisted markets are not included.
+	Markets []PerpMarket `json:"markets"`
+	// The data is older than it should be: the provider could not be read just now.
+	Stale bool `json:"stale"`
+}
+
+// FuturesOpenOrders: The account's open orders.
+type FuturesOpenOrders struct {
+	// When read.
+	AsOf *time.Time `json:"as_of,omitempty"`
+	// Whether the account has a futures account.
+	HasAccount bool `json:"has_account"`
+	// The open orders.
+	Orders []OpenOrder `json:"orders"`
+	// Older than it should be.
+	Stale bool `json:"stale"`
+}
+
+// FuturesPositions: The account's positions.
+type FuturesPositions struct {
+	// When read.
+	AsOf *time.Time `json:"as_of,omitempty"`
+	// Whether the account has a futures account. Without one, nothing else is meaningful.
+	HasAccount bool       `json:"has_account"`
+	Positions  *Positions `json:"positions,omitempty"`
+	// Older than it should be.
+	Stale bool `json:"stale"`
+}
+
+// FuturesTrades: A futures market's recent public trades.
+type FuturesTrades struct {
+	// Coin.
+	Coin string `json:"coin"`
+	// The live feed is not healthy, or was only just opened: trades may be missing.
+	Stale bool `json:"stale"`
+	// Newest first.
+	Trades []FuturesPublicTrade `json:"trades"`
 }
 
 // FuturesTransferID: Unique identifier of a futures collateral transfer.
@@ -523,6 +670,12 @@ func (r *LedgerReference) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// Level: One price level.
+type Level struct {
+	Price Amount `json:"price"`
+	Size  Amount `json:"size"`
+}
+
 // LiquidityRole: Whether a fill added liquidity (maker) or removed it (taker).
 //
 // The type is open: values added to the API later decode without error.
@@ -669,6 +822,26 @@ type Notification struct {
 	Title string `json:"title"`
 }
 
+// OpenOrder: One open order.
+type OpenOrder struct {
+	// Coin.
+	Coin string `json:"coin"`
+	// Our id for it, stable across reads.
+	ID string `json:"id"`
+	// The order type as the provider names it (`Limit`, `Stop Market`, ...).
+	OrderType    string `json:"order_type"`
+	OriginalSize Amount `json:"original_size"`
+	// When placed, unix milliseconds.
+	PlacedAt int64  `json:"placed_at"`
+	Price    Amount `json:"price"`
+	// Whether it may only reduce a position.
+	ReduceOnly bool `json:"reduce_only"`
+	// `buy` or `sell`.
+	Side         string  `json:"side"`
+	Size         Amount  `json:"size"`
+	TriggerPrice *Amount `json:"trigger_price,omitempty"`
+}
+
 // OrderBook: One side of the order book, aggregated by price.
 type OrderBook struct {
 	// Asks, best first.
@@ -777,6 +950,23 @@ type PasswordRules struct {
 	MinLength int `json:"min_length"`
 }
 
+// PerpMarket: One listed perpetual market and its current figures.
+type PerpMarket struct {
+	// The provider's coin name, e.g. `BTC` or `kPEPE`.
+	Coin        string `json:"coin"`
+	FundingRate Amount `json:"funding_rate"`
+	MarkPrice   Amount `json:"mark_price"`
+	// The highest leverage allowed.
+	MaxLeverage  int     `json:"max_leverage"`
+	MidPrice     *Amount `json:"mid_price,omitempty"`
+	OpenInterest Amount  `json:"open_interest"`
+	OraclePrice  Amount  `json:"oracle_price"`
+	Price24hAgo  Amount  `json:"price_24h_ago"`
+	// Decimal places a size may have.
+	SizeDecimals int    `json:"size_decimals"`
+	Volume24h    Amount `json:"volume_24h"`
+}
+
 // PlaceOrderRequest: Places an order.
 //
 // Set `client_order_id` to make a retry safe: it is unique per account, so a repeat is refused before any funds move, and `GET /trading/orders/by-client-id/{client_order_id}` recovers the outcome. `Idempotency-Key` is not honoured for orders.
@@ -838,6 +1028,44 @@ const (
 	PoolStatusPaused  PoolStatus = "paused"
 	PoolStatusClosing PoolStatus = "closing"
 )
+
+// Position: One open position.
+type Position struct {
+	// Coin.
+	Coin             string  `json:"coin"`
+	EntryPrice       *Amount `json:"entry_price,omitempty"`
+	FundingSinceOpen Amount  `json:"funding_since_open"`
+	// Leverage.
+	Leverage int `json:"leverage"`
+	// `cross` or `isolated`.
+	LeverageType     string  `json:"leverage_type"`
+	LiquidationPrice *Amount `json:"liquidation_price,omitempty"`
+	MarginUsed       Amount  `json:"margin_used"`
+	PositionValue    Amount  `json:"position_value"`
+	ReturnOnEquity   Amount  `json:"return_on_equity"`
+	Size             Amount  `json:"size"`
+	UnrealizedPnl    Amount  `json:"unrealized_pnl"`
+}
+
+// Positions: A margin summary and the open positions.
+type Positions struct {
+	AccountValue      Amount `json:"account_value"`
+	MaintenanceMargin Amount `json:"maintenance_margin"`
+	MarginUsed        Amount `json:"margin_used"`
+	// The open positions.
+	Positions     []Position `json:"positions"`
+	TotalNotional Amount     `json:"total_notional"`
+}
+
+// FuturesPublicTrade: A public trade, with nothing that identifies the parties.
+type FuturesPublicTrade struct {
+	Price Amount `json:"price"`
+	// `buy` or `sell`: the taker's side.
+	Side string `json:"side"`
+	Size Amount `json:"size"`
+	// When, unix milliseconds.
+	Time int64 `json:"time"`
+}
 
 // PublicTrade: A public trade.
 //

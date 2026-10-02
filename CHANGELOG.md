@@ -6,6 +6,73 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-dev.10] (2026-10-02)
+
+### Added
+- Futures data, read only: `Client.Futures` with `Markets`, `Market`, `OrderBook`, `Candles` and
+  `Trades` (public), and `Positions`, `OpenOrders`, `Fills` and `Funding` (API key, read scope).
+  Generated models for the nine `GET /api/v1/futures/...` operations; the futures candle, fill and
+  public trade are `FuturesCandle`, `FuturesFill` and `FuturesPublicTrade`, since `Candle`, `Fill`
+  and `PublicTrade` are the spot models.
+- `Futures.AllFills` and `Futures.AllFunding` iterate over the whole history (spec
+  `conformance/futures/history_paging.json`): the opaque cursor is sent back verbatim (RFC 3986
+  in the query) until `next_cursor` is null, short and empty pages included. An empty page that
+  returns the cursor just sent means the provider is busy: the iterator backs off and retries the
+  same cursor up to `WithMaxBusyRetries(n)` times (default 3, a setting of its own: a client with
+  `NoRetries` still rides out a busy provider; each wait goes to `Options.OnRetry`), then yields a
+  retryable `*APIError` with code `CodePagingStalled` (`PAGING_STALLED`, `Status` 0,
+  `Details["cursor"]` to resume). A page with rows that returns the cursor just sent yields its rows,
+  then a non-retryable `CodePagingCursorRepeated` (`PAGING_CURSOR_REPEATED`) error: the iterator
+  never loops. Without a futures account (`has_account` false) they end with no rows.
+- `APIError.Error` omits the status for an error made by the SDK (`Status` 0).
+- Futures WebSocket channels (spec `conformance/ws/futures.json`): `futures.mids`,
+  `futures.orderbook:{coin}`, `futures.trades:{coin}`, `futures.candles:{coin}:{interval}`,
+  `futures.status` and the private `futures.account`. Channel helpers (`FuturesMidsChannel`,
+  `FuturesOrderBookChannel`, `FuturesTradesChannel`, `FuturesCandlesChannel`,
+  `FuturesStatusChannel`, `FuturesAccountChannel`) check the coin and interval locally
+  (`*ConfigError`, nothing sent). The futures event types are delivered to `OnEvent`, with data
+  types `FuturesMids`, `FuturesBookUpdate`, `FuturesTradesUpdate`, `FuturesCandleUpdate`,
+  `FuturesStatus`, `FuturesPositionsUpdate` and `FuturesOrdersUpdate`.
+- `futures.account` is in `PrivateChannels`. Subscribed while signed out it is held
+  (`WebSocket.PendingChannels`) until `Auth` or `AuthKey` succeeds.
+- `futures.resync` goes to `OnEvent` and the new `OnFuturesResync(channel)` handler. On
+  `futures.account` the client also sends unsubscribe then subscribe (the server's poller stopped);
+  a refusal is reported and the channel is no longer held (`UNAUTHENTICATED`: pending until the
+  next auth).
+- `SubscribeResult.RefusedByServer`: the channels the server refused, each with its error frame
+  (`SubscribeRefusal`).
+  Refused channels are the channels sent that are missing from the ack, matched with the server's
+  canonicalisation: futures names exactly (coins are case-sensitive), spot names
+  case-insensitively with `_` read as `/` in the market symbol (`ticker:btc_usdt` is
+  `ticker:BTC/USDT`).
+
+### Changed
+- `PingInterval` above 60 s is a `*ConfigError` when the WebSocket is created (the server closes
+  connections silent for 90 s). The default stays 30 s.
+- `Subscribe` returns an error only when every channel sent was refused (the first refusal) or no
+  answer came; a partly refused subscribe returns the refused channels in `RefusedByServer` and no
+  error. No acknowledgement within `AckTimeout` is now a `TIMEOUT` error (it used to count as
+  "nothing new"); the channels stay held.
+- Automatic re-subscribes (after a reconnect or a re-auth) follow one rule for spot and futures
+  channels: a private channel refused with `UNAUTHENTICATED` goes back to pending until the next
+  successful auth; any other refusal drops the channel. Each refusal is reported to `OnError` as a
+  `*SubscribeRefusal`. Refused channels used to stay held (reconnect) or all go back to pending
+  (re-auth).
+
+### Fixed
+- A WebSocket subscribe with several channels that the server partly refuses: the server sends an
+  error frame per refused channel before its single `subscribed` ack (and no ack when it accepted
+  nothing). `Subscribe` now waits for the ack, returns the accepted channels in `Added` and the
+  refused ones in `RefusedByServer`, and keeps holding the accepted ones. It used to fail on the
+  first error frame and drop every channel of the request.
+- Subscribe ack matching follows the server's canonicalisation (spec
+  `conformance/ws/subscribe_refusals.json`): channel kinds match exactly (`Ticker:BTC/USDT` is a
+  different channel, refused by the server, no longer matched to `ticker:BTC/USDT`); only the spot
+  market symbol is trimmed, uppercased and read with `_` as `/`. Spellings of one channel
+  (`ticker:btc_usdt`, `ticker:BTC/USDT`) are sent once and held under the name the server
+  acknowledged; ack names are matched as a multiset, so a repeated name acknowledges one channel
+  each. Holding and unsubscribing compare channels the same way.
+
 ## [0.1.0-dev.9] (2026-10-01)
 
 ### Changed

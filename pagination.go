@@ -51,16 +51,23 @@ func paginate[T any](ctx context.Context, start *string, maxItems int,
 	}
 }
 
-// IterOption limits an iterator: WithMaxItems.
+// IterOption configures an iterator: WithMaxItems, WithMaxBusyRetries, WithCallOptions.
 type IterOption func(*iterOptions)
 
 type iterOptions struct {
-	maxItems int
-	call     []CallOption
+	maxItems       int
+	maxBusyRetries *int
+	call           []CallOption
 }
 
 // WithMaxItems stops the iterator after n items in total.
 func WithMaxItems(n int) IterOption { return func(o *iterOptions) { o.maxItems = n } }
+
+// WithMaxBusyRetries sets how many times in a row Futures.AllFills and Futures.AllFunding ask
+// again for a page while the futures provider is busy, before they yield PAGING_STALLED. Default
+// DefaultMaxBusyRetries (3). It is independent of the client's retry count: a client with
+// NoRetries still rides out a busy provider. 0 gives up at the first busy page.
+func WithMaxBusyRetries(n int) IterOption { return func(o *iterOptions) { o.maxBusyRetries = &n } }
 
 // WithCallOptions applies call options (timeout, retries) to every page request.
 func WithCallOptions(opts ...CallOption) IterOption {

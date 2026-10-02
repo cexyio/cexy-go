@@ -90,7 +90,12 @@ func (m *mockWS) handler(t *testing.T) http.HandlerFunc {
 					m.write(c, map[string]any{"type": "error", "code": "UNAUTHENTICATED", "message": "authentication required", "id": id})
 					continue
 				}
-				m.write(c, map[string]any{"type": "subscribed", "channels": f["channels"], "id": id})
+				// The server acks the canonical names (ticker:btc_usdt is acked as ticker:BTC/USDT).
+				acked := []any{}
+				for _, ch := range stringList(f["channels"]) {
+					acked = append(acked, channelKey(ch))
+				}
+				m.write(c, map[string]any{"type": "subscribed", "channels": acked, "id": id})
 			case "unsubscribe":
 				m.write(c, map[string]any{"type": "unsubscribed", "channels": f["channels"], "id": id})
 			case "auth":
@@ -282,10 +287,41 @@ func TestWSReconnectRestoresAuthAndChannels(t *testing.T) {
 	}
 }
 
+// Rule 13 of conformance/ws/subscribe_refusals.json: an accepted channel is held, reported and
+// re-sent after a reconnect under the canonical name from the ack; any spelling unsubscribes it.
+func TestWSHeldUnderCanonicalAckName(t *testing.T) {
+	ws, m := setupWS(t, WSOptions{})
+	ctx := context.Background()
+	if _, err := ws.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ws.Subscribe(ctx, "ticker:btc_usdt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(res.Added, []string{"ticker:BTC/USDT"}) {
+		t.Fatalf("added %v", res.Added)
+	}
+	if held := ws.Channels(); !slices.Equal(held, []string{"ticker:BTC/USDT"}) {
+		t.Fatalf("held %v", held)
+	}
+	m.last().CloseNow()
+	eventually(t, "re-subscribe", func() bool { return m.connCount() == 2 && len(m.sent("subscribe")) == 2 })
+	if got := stringList(m.sent("subscribe")[1]["channels"]); !slices.Equal(got, []string{"ticker:BTC/USDT"}) {
+		t.Fatalf("re-sent %v", got)
+	}
+	if err := ws.Unsubscribe(ctx, "ticker:btc_usdt"); err != nil {
+		t.Fatal(err)
+	}
+	if held := ws.Channels(); len(held) != 0 {
+		t.Fatalf("held after unsubscribe %v", held)
+	}
+}
+
 func TestWSLivenessTimeoutReconnects(t *testing.T) {
 	var closes []CloseInfo
 	var mu sync.Mutex
-	ws, m := setupWS(t, WSOptions{LivenessTimeout: 150 * time.Millisecond, PingInterval: time.Hour,
+	ws, m := setupWS(t, WSOptions{LivenessTimeout: 150 * time.Millisecond, PingInterval: maxPingInterval,
 		Handlers: WSHandlers{OnClose: func(ci CloseInfo) { mu.Lock(); closes = append(closes, ci); mu.Unlock() }}})
 	if _, err := ws.Connect(context.Background()); err != nil {
 		t.Fatal(err)

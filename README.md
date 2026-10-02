@@ -14,7 +14,7 @@ The official Go SDK for the [CEXY.io](https://cexy.io) REST and WebSocket API.
 ## Install
 
 ```bash
-go get github.com/cexyio/cexy-go@v0.1.0-dev.9
+go get github.com/cexyio/cexy-go@v0.1.0-dev.10
 ```
 
 ```go
@@ -211,6 +211,54 @@ for order, err := range c.Trading.AllOrderHistory(ctx, &cexy.OrderHistoryParams{
 // cap the total: c.Account.AllLedger(ctx, nil, cexy.WithMaxItems(500))
 ```
 
+## Futures data (read only)
+
+`c.Futures` reads futures market data and the account's own futures data. Nothing here places
+or changes anything. Markets are named by coin (`"BTC"`), not by spot symbol.
+
+```go
+mk, err := c.Futures.Markets(ctx)                  // every listed market and its figures
+m, err := c.Futures.Market(ctx, "BTC")
+book, err := c.Futures.OrderBook(ctx, "BTC", 10)   // levels a side, 1 to 20 (0: the default, 20)
+cs, err := c.Futures.Candles(ctx, "BTC", cexy.CandlesParams{Interval: "1h"}) // 500 candles; Before: an older window
+tr, err := c.Futures.Trades(ctx, "BTC", 50)        // recent public trades, at most 100 (0: the default, 50)
+```
+
+Every market response carries `AsOf` and `Stale`. For books and trades `Stale` is the live feed's
+health, not the data's age: a quiet book can be unchanged and current. When nothing usable is
+cached the API answers 503 `SERVICE_UNAVAILABLE` (retryable, with `Retry-After`), which the client
+retries like any other retryable error.
+
+With an API key (read scope), the account's own data:
+
+```go
+pos, err := c.Futures.Positions(ctx)    // margin summary and open positions
+oo, err := c.Futures.OpenOrders(ctx)
+if !pos.HasAccount {
+	// no futures account: the reads succeed and hold nothing
+}
+for f, err := range c.Futures.AllFills(ctx) { // newest first, 30 days back
+	if err != nil {
+		return err
+	}
+	fmt.Println(f.ID, f.Coin, f.Side, f.Price, f.Size)
+}
+// funding payments: c.Futures.AllFunding(ctx); one page: c.Futures.Fills(ctx, cursor)
+```
+
+Fills and funding are paged by an opaque cursor: pass `NextCursor` back exactly as given (`""` for
+the newest page) until it is nil. A page may be short, even empty, and still have a next cursor.
+`AllFills` and `AllFunding` do this for you. While the futures provider is busy the server answers
+an empty page that hands back the cursor it was given: the iterator waits (the client's backoff,
+reported to `Options.OnRetry`) and asks again, at most `cexy.WithMaxBusyRetries(n)` times in a row
+(3 by default; independent of the client's retry count, so a client with `NoRetries` still rides
+out a busy provider), then yields a retryable `*cexy.APIError` with code `cexy.CodePagingStalled`
+(`PAGING_STALLED`, made by the SDK, `Status` 0). The rows already yielded are not the whole
+history: resume later from `Details["cursor"]`. A page with rows that hands back the cursor it was
+sent is a server error: its rows are yielded, then a non-retryable `cexy.CodePagingCursorRepeated`
+(`PAGING_CURSOR_REPEATED`) error ends the iteration. Without a futures account the iterators end
+at once with no rows.
+
 ## Rate limits
 
 The client has a token-bucket limiter: **100 requests a minute without a key** (the server allows
@@ -317,6 +365,57 @@ The signed timestamp must be at most 30 s behind and 5 s ahead of the server clo
 clock synchronised (NTP). After `SIGNATURE_EXPIRED` the client adopts the server clock (at most 1 h
 away) and resends once. For a few seconds after the API's replay-protection store restarts, it may
 answer `503 SERVICE_UNAVAILABLE` (`nonce_store_warming`); reads are retried after `Retry-After`.
+
+### Futures channels
+
+```go
+book, _ := cexy.FuturesOrderBookChannel("BTC")        // "futures.orderbook:BTC"
+candles, _ := cexy.FuturesCandlesChannel("BTC", "1m") // "futures.candles:BTC:1m"
+_, err := ws.Subscribe(ctx, cexy.FuturesMidsChannel, book, candles)
+// in OnEvent:
+switch ev.Type {
+case "futures.orderbook.update":
+	var b cexy.FuturesBookUpdate // the complete book: replace yours
+	_ = ev.Decode(&b)
+case "futures.mids": // cexy.FuturesMids, the full set
+case "futures.trades.new": // cexy.FuturesTradesUpdate
+case "futures.candle.update": // cexy.FuturesCandleUpdate
+case "futures.status": // cexy.FuturesStatus: live or degraded
+}
+```
+
+The helpers check the coin (1 to 20 ASCII letters or digits, sent exactly as given: `BTC` and
+`btc` differ) and the interval (`1m`, `5m`, `15m`, `1h`, `4h`, `1d`) and return a
+`*cexy.ConfigError` before anything is sent. Public futures channels send nothing on subscribe:
+seed them from `c.Futures` over REST. Book levels are `{price, size}` objects (`[]cexy.Level`), not
+the spot `[price, quantity]` arrays.
+
+`cexy.FuturesAccountChannel` (`futures.account`, private) sends `futures.positions`
+(`cexy.FuturesPositionsUpdate`) and `futures.orders` (`cexy.FuturesOrdersUpdate`) in full on
+subscribe and on change. Subscribed before `Auth` or `AuthKey`, it is held (`ws.PendingChannels()`)
+and subscribed once the connection is authenticated.
+
+`futures.resync` (data `{}`) is delivered to `OnEvent` and to `OnFuturesResync(channel)`: data on
+that channel may have been missed, refetch it over REST. On `futures.account` the server's poller
+has stopped, so the client also unsubscribes and subscribes again by itself; if the server refuses
+(for example `NOT_FOUND` "No futures account"), the error is reported (`OnServerError`, `OnError`)
+and the channel is no longer held (an `UNAUTHENTICATED` refusal keeps it pending until the next
+auth).
+
+A refused futures subscribe (`RATE_LIMITED`, `NOT_FOUND`, `VALIDATION_FAILED`,
+`SERVICE_UNAVAILABLE`) is returned by `Subscribe` and is not retried. WebSocket error frames carry
+no retry hint: wait yourself (the server means 60 s) before trying again.
+
+Subscribe refusals work the same for every channel. `SubscribeResult.Added` lists the channels the
+server accepted and `SubscribeResult.RefusedByServer` the refused ones, each with its error frame;
+only the accepted channels are held. `Subscribe` returns an error only when every channel sent was
+refused, or when no answer came (`TIMEOUT`, a dropped connection). When the client re-subscribes by
+itself (after a reconnect or a re-auth), a private channel refused with `UNAUTHENTICATED` waits for
+the next successful auth (`ws.PendingChannels()`); any other refusal drops the channel. Each is
+reported to `OnError` as a `*cexy.SubscribeRefusal` (`errors.As` also finds its `*cexy.WSError`).
+
+The client pings at least every 60 s: the server closes connections silent for 90 s. A
+`PingInterval` above 60 s is a `*cexy.ConfigError` from `NewWebSocket` / `Client.WebSocket`.
 
 ### Live balances
 
