@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-dev.10] (2026-10-02)
+
+### Added
+- Futures data, read only: `Client.Futures` with `Markets`, `Market`, `OrderBook`, `Candles` and
+  `Trades` (public), and `Positions`, `OpenOrders`, `Fills` and `Funding` (API key, read scope).
+  Generated models for the nine `GET /api/v1/futures/...` operations; the futures candle, fill and
+  public trade are `FuturesCandle`, `FuturesFill` and `FuturesPublicTrade`, since `Candle`, `Fill`
+  and `PublicTrade` are the spot models.
+- `Futures.AllFills` and `Futures.AllFunding` iterate over the whole history (spec
+  `conformance/futures/history_paging.json`): the opaque cursor is sent back verbatim (RFC 3986
+  in the query) until `next_cursor` is null, short and empty pages included. An empty page that
+  returns the cursor just sent means the provider is busy: the iterator backs off and retries the
+  same cursor up to the client's retry count (default 3), then yields a retryable `*APIError` with
+  code `CodePagingStalled` (`PAGING_STALLED`, `Status` 0, `Details["cursor"]` to resume). Without a
+  futures account (`has_account` false) they end with no rows.
+- `APIError.Error` omits the status for an error made by the SDK (`Status` 0).
+
 ## [0.1.0-dev.9] (2026-10-01)
 
 ### Changed

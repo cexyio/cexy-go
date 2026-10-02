@@ -88,6 +88,7 @@ type Client struct {
 	Exports  *ExportsService
 	Wallet   *WalletService
 	Trading  *TradingService
+	Futures  *FuturesService
 
 	t             *transport
 	baseURL       string
@@ -203,6 +204,7 @@ func New(opts Options) (*Client, error) {
 		Exports:       &ExportsService{t},
 		Wallet:        &WalletService{t},
 		Trading:       &TradingService{t},
+		Futures:       &FuturesService{t},
 		t:             t,
 		baseURL:       base,
 		allowInsecure: opts.AllowInsecure,

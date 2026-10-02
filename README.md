@@ -14,7 +14,7 @@ The official Go SDK for the [CEXY.io](https://cexy.io) REST and WebSocket API.
 ## Install
 
 ```bash
-go get github.com/cexyio/cexy-go@v0.1.0-dev.9
+go get github.com/cexyio/cexy-go@v0.1.0-dev.10
 ```
 
 ```go
@@ -210,6 +210,50 @@ for order, err := range c.Trading.AllOrderHistory(ctx, &cexy.OrderHistoryParams{
 }
 // cap the total: c.Account.AllLedger(ctx, nil, cexy.WithMaxItems(500))
 ```
+
+## Futures data (read only)
+
+`c.Futures` reads futures market data and the account's own futures data. Nothing here places
+or changes anything. Markets are named by coin (`"BTC"`), not by spot symbol.
+
+```go
+mk, err := c.Futures.Markets(ctx)                  // every listed market and its figures
+m, err := c.Futures.Market(ctx, "BTC")
+book, err := c.Futures.OrderBook(ctx, "BTC", 10)   // levels a side, 1 to 20 (0: the default, 20)
+cs, err := c.Futures.Candles(ctx, "BTC", cexy.CandlesParams{Interval: "1h"}) // 500 candles; Before: an older window
+tr, err := c.Futures.Trades(ctx, "BTC", 50)        // recent public trades, at most 100 (0: the default, 50)
+```
+
+Every market response carries `AsOf` and `Stale`. For books and trades `Stale` is the live feed's
+health, not the data's age: a quiet book can be unchanged and current. When nothing usable is
+cached the API answers 503 `SERVICE_UNAVAILABLE` (retryable, with `Retry-After`), which the client
+retries like any other retryable error.
+
+With an API key (read scope), the account's own data:
+
+```go
+pos, err := c.Futures.Positions(ctx)    // margin summary and open positions
+oo, err := c.Futures.OpenOrders(ctx)
+if !pos.HasAccount {
+	// no futures account: the reads succeed and hold nothing
+}
+for f, err := range c.Futures.AllFills(ctx) { // newest first, 30 days back
+	if err != nil {
+		return err
+	}
+	fmt.Println(f.ID, f.Coin, f.Side, f.Price, f.Size)
+}
+// funding payments: c.Futures.AllFunding(ctx); one page: c.Futures.Fills(ctx, cursor)
+```
+
+Fills and funding are paged by an opaque cursor: pass `NextCursor` back exactly as given (`""` for
+the newest page) until it is nil. A page may be short, even empty, and still have a next cursor.
+`AllFills` and `AllFunding` do this for you. While the futures provider is busy the server answers
+an empty page that hands back the cursor it was given: the iterator waits (the client's backoff)
+and asks again, at most the client's retry count in a row (3 by default), then yields a retryable
+`*cexy.APIError` with code `cexy.CodePagingStalled` (`PAGING_STALLED`, made by the SDK, `Status`
+0). The rows already yielded are not the whole history: resume later from `Details["cursor"]`.
+Without a futures account the iterators end at once with no rows.
 
 ## Rate limits
 

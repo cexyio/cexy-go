@@ -34,7 +34,7 @@ const CodeUnexpectedRedirect ErrorCode = "UNEXPECTED_REDIRECT"
 
 // APIError is an error response from the API (the {"error": {...}} envelope).
 type APIError struct {
-	// HTTP status.
+	// HTTP status; 0 for an error made by the SDK itself (CodePagingStalled).
 	Status int
 	// Machine-readable code. A code missing from errors.yaml is passed through unchanged;
 	// a response without the envelope (a proxy error page) gets "HTTP_<status>".
@@ -60,6 +60,9 @@ func (e *APIError) Error() string {
 	rid := ""
 	if e.RequestID != "" {
 		rid = " (request_id " + e.RequestID + ")"
+	}
+	if e.Status == 0 { // made by the SDK (CodePagingStalled), not an HTTP response
+		return fmt.Sprintf("cexy: [%s] %s%s", e.Code, e.Message, rid)
 	}
 	return fmt.Sprintf("cexy: [%d %s] %s%s", e.Status, e.Code, e.Message, rid)
 }

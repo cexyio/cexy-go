@@ -17,6 +17,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("building the client: %v", err)
 	}
+	if c.Futures == nil {
+		log.Fatal("Client.Futures is nil")
+	}
 	if cexy.Version == "" {
 		log.Fatal("cexy.Version is empty")
 	}
