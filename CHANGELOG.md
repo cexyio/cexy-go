@@ -65,6 +65,13 @@ All notable changes to this project are documented here. The format follows
   nothing). `Subscribe` now waits for the ack, returns the accepted channels in `Added` and the
   refused ones in `RefusedByServer`, and keeps holding the accepted ones. It used to fail on the
   first error frame and drop every channel of the request.
+- Subscribe ack matching follows the server's canonicalisation (spec
+  `conformance/ws/subscribe_refusals.json`): channel kinds match exactly (`Ticker:BTC/USDT` is a
+  different channel, refused by the server, no longer matched to `ticker:BTC/USDT`); only the spot
+  market symbol is trimmed, uppercased and read with `_` as `/`. Spellings of one channel
+  (`ticker:btc_usdt`, `ticker:BTC/USDT`) are sent once and held under the name the server
+  acknowledged; ack names are matched as a multiset, so a repeated name acknowledges one channel
+  each. Holding and unsubscribing compare channels the same way.
 
 ## [0.1.0-dev.9] (2026-10-01)
 

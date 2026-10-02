@@ -568,6 +568,8 @@ type refusalExpect struct {
 	Before    bool              `json:"completes_before_timeout"`
 	Code      string            `json:"error_code"`
 	HeldAfter []string          `json:"held_after"`
+	Events    []string          `json:"events_delivered"`
+	HasID     bool              `json:"request_has_id"`
 }
 
 func checkRefusal(t *testing.T, name string, res SubscribeResult, err error, x refusalExpect) {
@@ -583,10 +585,8 @@ func checkRefusal(t *testing.T, name string, res SubscribeResult, err error, x r
 	if added == nil {
 		added = []string{}
 	}
-	if x.Added == nil {
-		x.Added = []string{}
-	}
-	if !slices.Equal(added, x.Added) {
+	// A case without "added" does not pin it (nil); "added": [] does.
+	if x.Added != nil && !slices.Equal(added, x.Added) {
 		t.Errorf("%s: added %v, want %v", name, added, x.Added)
 	}
 	refused := map[string]string{}
@@ -619,8 +619,8 @@ func TestWSSubscribeRefusalsConformance(t *testing.T) {
 		} `json:"cases"`
 	}
 	readJSON(t, filepath.Join(specDir(t), "conformance", "ws", "subscribe_refusals.json"), &spec)
-	if len(spec.Cases) != 7 {
-		t.Fatalf("%d cases, want 7", len(spec.Cases))
+	if len(spec.Cases) != 11 {
+		t.Fatalf("%d cases, want 11", len(spec.Cases))
 	}
 	type result struct {
 		res SubscribeResult
@@ -639,9 +639,13 @@ func TestWSSubscribeRefusalsConformance(t *testing.T) {
 					done <- result{res, err, time.Since(start)}
 				}()
 				var id any
+				// The client may drop spellings of one channel before sending: match canonically.
 				eventually(t, "subscribe frame", func() bool {
 					for _, f := range r.s.requests() {
-						if f["op"] == "subscribe" && slices.Equal(stringList(f["channels"]), channels) {
+						sent := stringList(f["channels"])
+						if f["op"] == "subscribe" && len(sent) > 0 && !slices.ContainsFunc(sent, func(s string) bool {
+							return !slices.ContainsFunc(channels, func(c string) bool { return sameChannel(s, c) })
+						}) {
 							id = f["id"]
 							return true
 						}
@@ -684,6 +688,23 @@ func TestWSSubscribeRefusalsConformance(t *testing.T) {
 			if x.Before && got.at >= r.ws.opts.AckTimeout {
 				t.Errorf("completed after %s, the ack timeout is %s", got.at, r.ws.opts.AckTimeout)
 			}
+			if x.HasID {
+				if s, _ := id.(string); s == "" {
+					t.Errorf("subscribe sent without an id: %v", id)
+				}
+			}
+			if x.Events != nil {
+				r.settle()
+				r.mu.Lock()
+				var types []string
+				for _, e := range r.events {
+					types = append(types, e.Type)
+				}
+				r.mu.Unlock()
+				if !slices.Equal(types, x.Events) {
+					t.Errorf("events delivered %v, want %v", types, x.Events)
+				}
+			}
 			if x.HeldAfter != nil {
 				if held := r.ws.Channels(); !slices.Equal(held, x.HeldAfter) {
 					t.Errorf("held %v, want %v", held, x.HeldAfter)
@@ -705,9 +726,27 @@ func TestSameChannel(t *testing.T) {
 		{"futures.orderbook:btc", "futures.orderbook:BTC", false},
 		{"futures.candles:kPEPE:1m", "futures.candles:KPEPE:1m", false},
 		{"balances", "balances", true},
+		{"Ticker:BTC/USDT", "ticker:BTC/USDT", false},
+		{" ticker: btc_usdt ", "ticker:BTC/USDT", true},
 	} {
 		if got := sameChannel(tc.sent, tc.acked); got != tc.same {
 			t.Errorf("sameChannel(%q, %q) = %v", tc.sent, tc.acked, got)
 		}
+	}
+}
+
+// channel_kind_is_exact with the same market: Ticker:BTC/USDT is a different (refused) channel,
+// never folded into ticker:BTC/USDT, neither before sending nor when matching the ack.
+func TestSubscribeKindExactSameMarket(t *testing.T) {
+	sent := uniqChannels([]string{"Ticker:BTC/USDT", "ticker:BTC/USDT", "ticker:btc_usdt"})
+	if !slices.Equal(sent, []string{"Ticker:BTC/USDT", "ticker:BTC/USDT"}) {
+		t.Fatalf("sent %v", sent)
+	}
+	o := subscribeResult(sent, wsAck{
+		frame:    map[string]any{"type": "subscribed", "channels": []any{"ticker:BTC/USDT"}},
+		refusals: []*WSError{{Code: "VALIDATION_FAILED", FromServer: true}},
+	})
+	if o.err != nil || len(o.refused) != 1 || o.refused[0].Channel != "Ticker:BTC/USDT" || o.refused[0].Err.Code != "VALIDATION_FAILED" {
+		t.Fatalf("outcome %+v", o)
 	}
 }

@@ -769,7 +769,8 @@ func (w *WebSocket) Ping(ctx context.Context) (time.Duration, error) {
 // waits for the next successful auth (PendingChannels); any other refusal drops the channel.
 // Each such refusal goes to OnError as a *SubscribeRefusal.
 func (w *WebSocket) Subscribe(ctx context.Context, channels ...string) (SubscribeResult, error) {
-	wanted := uniq(channels)
+	// Two spellings of one channel (ticker:btc_usdt, ticker:BTC/USDT) are one subscription: send it once.
+	wanted := uniqChannels(channels)
 	for _, c := range wanted {
 		if c == "" || len(c) > maxChannelLength {
 			return SubscribeResult{}, &WSError{Code: "CONFIG", Message: fmt.Sprintf("invalid channel name: %q", c)}
@@ -812,6 +813,15 @@ func (w *WebSocket) Subscribe(ctx context.Context, channels ...string) (Subscrib
 	w.mu.Lock()
 	for _, r := range o.refused {
 		w.drop(r.Channel)
+	}
+	// Hold accepted channels by the name the server acknowledged (its canonical form).
+	for _, a := range o.added {
+		for i, x := range w.channels {
+			if x != a && sameChannel(x, a) && slices.Contains(send, x) {
+				w.channels[i] = a
+				break
+			}
+		}
 	}
 	w.mu.Unlock()
 	res.Added = o.added
@@ -1488,14 +1498,22 @@ func (w *WebSocket) sendSubscribe(ctx context.Context, channels []string) subscr
 // subscribeResult: the channels missing from the ack were refused, matched in order with the
 // error frames (after the server's subscription cap it stops with one error for the rest).
 func subscribeResult(channels []string, ack wsAck) subscribeOutcome {
-	o := subscribeOutcome{added: subscribed(ack.frame)}
+	acked := subscribed(ack.frame)
+	o := subscribeOutcome{added: uniq(acked)}
+	if o.added == nil {
+		o.added = []string{}
+	}
 	if len(ack.refusals) == 0 {
 		o.err = ack.err
 		return o
 	}
+	// The ack can repeat a name (a channel already held, or two spellings of one channel), so
+	// its names are matched as a multiset: each acknowledges one channel sent.
+	pool := append([]string(nil), acked...)
 	i := 0
 	for _, c := range channels {
-		if slices.ContainsFunc(o.added, func(a string) bool { return sameChannel(c, a) }) {
+		if j := slices.IndexFunc(pool, func(a string) bool { return sameChannel(c, a) }); j >= 0 {
+			pool = slices.Delete(pool, j, j+1)
 			continue
 		}
 		o.refused = append(o.refused, SubscribeRefusal{Channel: c, Err: ack.refusals[min(i, len(ack.refusals)-1)]})
@@ -1508,22 +1526,25 @@ func subscribeResult(channels []string, ack wsAck) subscribeOutcome {
 }
 
 // sameChannel matches a channel sent with one named in an ack, with the server's
-// canonicalisation: futures names exactly (coins are case-sensitive); spot names
-// case-insensitively, with "_" read as "/" in the market symbol (ticker:btc_usdt is
-// ticker:BTC/USDT).
+// canonicalisation (see channelKey).
 func sameChannel(sent, acked string) bool {
-	if strings.HasPrefix(sent, "futures.") || strings.HasPrefix(acked, "futures.") {
-		return sent == acked
-	}
-	return canonicalSpot(sent) == canonicalSpot(acked)
+	return channelKey(sent) == channelKey(acked)
 }
 
-func canonicalSpot(c string) string {
+// channelKey is the server's canonical form of a channel name: the whole name trimmed; the
+// channel kind exactly (Ticker:BTC/USDT is not ticker:BTC/USDT); a spot market symbol trimmed,
+// uppercased and with "_" read as "/" (ticker:btc_usdt is ticker:BTC/USDT); futures names
+// exactly (coins are case-sensitive).
+func channelKey(c string) string {
+	c = strings.TrimSpace(c)
+	if strings.HasPrefix(c, "futures.") {
+		return c
+	}
 	kind, market, ok := strings.Cut(c, ":")
 	if !ok {
-		return strings.ToUpper(c)
+		return c
 	}
-	return strings.ToUpper(kind) + ":" + strings.ToUpper(strings.ReplaceAll(market, "_", "/"))
+	return kind + ":" + strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(market), "_", "/"))
 }
 
 // resubscribed handles an automatic re-subscribe (after a reconnect, a re-auth, or futures.resync
@@ -1694,7 +1715,7 @@ func (w *WebSocket) emitError(err error) {
 // holds reports whether c is held, or pending re-subscription after a sign-out.
 func (w *WebSocket) holds(c string) bool {
 	for _, x := range w.channels {
-		if x == c {
+		if sameChannel(x, c) {
 			return true
 		}
 	}
@@ -1726,7 +1747,7 @@ func remove(list []string, c string) []string {
 
 func (w *WebSocket) drop(c string) {
 	for i, x := range w.channels {
-		if x == c {
+		if sameChannel(x, c) {
 			w.channels = append(w.channels[:i], w.channels[i+1:]...)
 			return
 		}
@@ -1827,6 +1848,19 @@ func uniq(in []string) []string {
 	for _, s := range in {
 		if !seen[s] {
 			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// uniqChannels drops channels that canonicalise alike (see channelKey), keeping the first spelling.
+func uniqChannels(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if k := channelKey(s); !seen[k] {
+			seen[k] = true
 			out = append(out, s)
 		}
 	}
