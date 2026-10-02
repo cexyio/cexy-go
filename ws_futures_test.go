@@ -560,3 +560,154 @@ func TestWSResubscribeAfterReconnectRefused(t *testing.T) {
 		t.Fatalf("held %v", held)
 	}
 }
+
+type refusalExpect struct {
+	Added     []string          `json:"added"`
+	Refused   map[string]string `json:"refused"`
+	Fails     bool              `json:"fails"`
+	Before    bool              `json:"completes_before_timeout"`
+	Code      string            `json:"error_code"`
+	HeldAfter []string          `json:"held_after"`
+}
+
+func checkRefusal(t *testing.T, name string, res SubscribeResult, err error, x refusalExpect) {
+	t.Helper()
+	if x.Code != "" {
+		var we *WSError
+		if !errors.As(err, &we) || we.Code != x.Code {
+			t.Errorf("%s: err %v, want %s", name, err, x.Code)
+		}
+		return
+	}
+	added := res.Added
+	if added == nil {
+		added = []string{}
+	}
+	if x.Added == nil {
+		x.Added = []string{}
+	}
+	if !slices.Equal(added, x.Added) {
+		t.Errorf("%s: added %v, want %v", name, added, x.Added)
+	}
+	refused := map[string]string{}
+	for _, r := range res.RefusedByServer {
+		refused[r.Channel] = r.Err.Code
+	}
+	if x.Refused == nil {
+		x.Refused = map[string]string{}
+	}
+	if !reflect.DeepEqual(refused, x.Refused) {
+		t.Errorf("%s: refused %v, want %v", name, refused, x.Refused)
+	}
+	if (err != nil) != x.Fails {
+		t.Errorf("%s: err %v, want fails=%v", name, err, x.Fails)
+	}
+}
+
+// Conformance: conformance/ws/subscribe_refusals.json.
+func TestWSSubscribeRefusalsConformance(t *testing.T) {
+	var spec struct {
+		Cases []struct {
+			ID     string           `json:"id"`
+			Send   []string         `json:"send"`
+			Server []map[string]any `json:"server"`
+			Conc   []struct {
+				Request string   `json:"request"`
+				Send    []string `json:"send"`
+			} `json:"concurrent"`
+			Expect json.RawMessage `json:"expect"`
+		} `json:"cases"`
+	}
+	readJSON(t, filepath.Join(specDir(t), "conformance", "ws", "subscribe_refusals.json"), &spec)
+	if len(spec.Cases) != 7 {
+		t.Fatalf("%d cases, want 7", len(spec.Cases))
+	}
+	type result struct {
+		res SubscribeResult
+		err error
+		at  time.Duration
+	}
+	for _, c := range spec.Cases {
+		t.Run(c.ID, func(t *testing.T) {
+			r := newFuturesWSRun(t)
+			ctx := context.Background()
+			start := time.Now()
+			subscribe := func(channels []string) (chan result, any) {
+				done := make(chan result, 1)
+				go func() {
+					res, err := r.ws.Subscribe(ctx, channels...)
+					done <- result{res, err, time.Since(start)}
+				}()
+				var id any
+				eventually(t, "subscribe frame", func() bool {
+					for _, f := range r.s.requests() {
+						if f["op"] == "subscribe" && slices.Equal(stringList(f["channels"]), channels) {
+							id = f["id"]
+							return true
+						}
+					}
+					return false
+				})
+				return done, id
+			}
+			write := func(frame map[string]any, id any) {
+				out := map[string]any{"id": id}
+				for k, v := range frame {
+					out[k] = v
+				}
+				r.s.write(out)
+			}
+			if len(c.Conc) > 0 {
+				done, ids := map[string]chan result{}, map[string]any{}
+				for _, q := range c.Conc {
+					done[q.Request], ids[q.Request] = subscribe(q.Send)
+				}
+				for _, f := range c.Server {
+					write(f["frame"].(map[string]any), ids[f["to"].(string)])
+				}
+				var want map[string]refusalExpect
+				_ = json.Unmarshal(c.Expect, &want)
+				for _, q := range c.Conc {
+					got := <-done[q.Request]
+					checkRefusal(t, q.Request, got.res, got.err, want[q.Request])
+				}
+				return
+			}
+			var x refusalExpect
+			_ = json.Unmarshal(c.Expect, &x)
+			done, id := subscribe(c.Send)
+			for _, f := range c.Server {
+				write(f, id)
+			}
+			got := <-done
+			checkRefusal(t, c.ID, got.res, got.err, x)
+			if x.Before && got.at >= r.ws.opts.AckTimeout {
+				t.Errorf("completed after %s, the ack timeout is %s", got.at, r.ws.opts.AckTimeout)
+			}
+			if x.HeldAfter != nil {
+				if held := r.ws.Channels(); !slices.Equal(held, x.HeldAfter) {
+					t.Errorf("held %v, want %v", held, x.HeldAfter)
+				}
+			}
+		})
+	}
+}
+
+func TestSameChannel(t *testing.T) {
+	for _, tc := range []struct {
+		sent, acked string
+		same        bool
+	}{
+		{"ticker:btc_usdt", "ticker:BTC/USDT", true},
+		{"orderbook:eth/usdt", "orderbook:ETH/USDT", true},
+		{"ticker:BTC/USDT", "ticker:ETH/USDT", false},
+		{"futures.orderbook:BTC", "futures.orderbook:BTC", true},
+		{"futures.orderbook:btc", "futures.orderbook:BTC", false},
+		{"futures.candles:kPEPE:1m", "futures.candles:KPEPE:1m", false},
+		{"balances", "balances", true},
+	} {
+		if got := sameChannel(tc.sent, tc.acked); got != tc.same {
+			t.Errorf("sameChannel(%q, %q) = %v", tc.sent, tc.acked, got)
+		}
+	}
+}

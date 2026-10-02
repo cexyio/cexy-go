@@ -1495,8 +1495,8 @@ func subscribeResult(channels []string, ack wsAck) subscribeOutcome {
 	}
 	i := 0
 	for _, c := range channels {
-		if slices.ContainsFunc(o.added, func(a string) bool { return strings.EqualFold(a, c) }) {
-			continue // spot names come back normalised
+		if slices.ContainsFunc(o.added, func(a string) bool { return sameChannel(c, a) }) {
+			continue
 		}
 		o.refused = append(o.refused, SubscribeRefusal{Channel: c, Err: ack.refusals[min(i, len(ack.refusals)-1)]})
 		i++
@@ -1505,6 +1505,25 @@ func subscribeResult(channels []string, ack wsAck) subscribeOutcome {
 		o.err = ack.refusals[0]
 	}
 	return o
+}
+
+// sameChannel matches a channel sent with one named in an ack, with the server's
+// canonicalisation: futures names exactly (coins are case-sensitive); spot names
+// case-insensitively, with "_" read as "/" in the market symbol (ticker:btc_usdt is
+// ticker:BTC/USDT).
+func sameChannel(sent, acked string) bool {
+	if strings.HasPrefix(sent, "futures.") || strings.HasPrefix(acked, "futures.") {
+		return sent == acked
+	}
+	return canonicalSpot(sent) == canonicalSpot(acked)
+}
+
+func canonicalSpot(c string) string {
+	kind, market, ok := strings.Cut(c, ":")
+	if !ok {
+		return strings.ToUpper(c)
+	}
+	return strings.ToUpper(kind) + ":" + strings.ToUpper(strings.ReplaceAll(market, "_", "/"))
 }
 
 // resubscribed handles an automatic re-subscribe (after a reconnect, a re-auth, or futures.resync

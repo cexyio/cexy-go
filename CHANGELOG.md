@@ -41,6 +41,10 @@ All notable changes to this project are documented here. The format follows
   next auth).
 - `SubscribeResult.RefusedByServer`: the channels the server refused, each with its error frame
   (`SubscribeRefusal`).
+  Refused channels are the channels sent that are missing from the ack, matched with the server's
+  canonicalisation: futures names exactly (coins are case-sensitive), spot names
+  case-insensitively with `_` read as `/` in the market symbol (`ticker:btc_usdt` is
+  `ticker:BTC/USDT`).
 
 ### Changed
 - `PingInterval` above 60 s is a `*ConfigError` when the WebSocket is created (the server closes

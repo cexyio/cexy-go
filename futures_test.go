@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // Every futures operation: method, path, query, and whether it is signed.
@@ -158,8 +160,10 @@ func TestFuturesLocalChecks(t *testing.T) {
 type pagingCase struct {
 	ID    string `json:"id"`
 	Pages []struct {
-		RequestCursor *string         `json:"request_cursor"`
-		Response      json.RawMessage `json:"response"`
+		RequestCursor *string           `json:"request_cursor"`
+		HTTPStatus    int               `json:"http_status"` // an error answer: Response is its body
+		Headers       map[string]string `json:"headers"`
+		Response      json.RawMessage   `json:"response"`
 	} `json:"pages"`
 	Expect struct {
 		IDs            []string `json:"ids"`
@@ -170,6 +174,8 @@ type pagingCase struct {
 		ErrorCode      string   `json:"error_code"`
 		ErrorRetryable bool     `json:"error_retryable"`
 		HasAccount     *bool    `json:"has_account"`
+		Times          []int64  `json:"times"` // funding_cases: the rows' time
+		MinSleep       float64  `json:"min_sleep_seconds"`
 	} `json:"expect"`
 }
 
@@ -196,11 +202,19 @@ func pagingServer(t *testing.T, tc pagingCase, rename func(json.RawMessage) json
 		case page.RequestCursor != nil && q.Get("cursor") != *page.RequestCursor:
 			t.Errorf("request %d: cursor %q, want %q", n+1, q.Get("cursor"), *page.RequestCursor)
 		}
+		w.Header().Set("Content-Type", "application/json")
+		if page.HTTPStatus != 0 {
+			for k, v := range page.Headers {
+				w.Header().Set(k, v)
+			}
+			w.WriteHeader(page.HTTPStatus)
+			_, _ = w.Write(page.Response)
+			return
+		}
 		body := page.Response
 		if rename != nil {
 			body = rename(body)
 		}
-		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":` + string(body) + `}`))
 	}
 }
@@ -213,6 +227,7 @@ func TestFuturesHistoryPagingConformance(t *testing.T) {
 		Operation string       `json:"operation"`
 		MaxBusy   int          `json:"max_busy_retries"`
 		Cases     []pagingCase `json:"cases"`
+		Funding   []pagingCase `json:"funding_cases"`
 	}
 	readJSON(t, filepath.Join(dir, "conformance", "futures", "history_paging.json"), &spec)
 	if spec.Operation != "GET /api/v1/futures/fills" || spec.MaxBusy != DefaultMaxBusyRetries || len(spec.Cases) == 0 {
@@ -235,102 +250,148 @@ func TestFuturesHistoryPagingConformance(t *testing.T) {
 		out, _ := json.Marshal(page)
 		return out
 	}
+	type run struct {
+		tc   pagingCase
+		kind string // fills; funding (the fills cases, rows renamed); funding_cases (native, by time)
+	}
+	var runs []run
 	seen := map[string]bool{}
 	for _, tc := range spec.Cases {
 		seen[tc.ID] = true
-		for _, kind := range []string{"fills", "funding"} {
-			t.Run(tc.ID+"/"+kind, func(t *testing.T) {
-				var rename func(json.RawMessage) json.RawMessage
-				path := "/api/v1/futures/fills"
-				if kind == "funding" {
-					rename, path = toFunding, "/api/v1/futures/funding"
+		runs = append(runs, run{tc, "fills"}, run{tc, "funding"})
+	}
+	for _, tc := range spec.Funding {
+		seen[tc.ID] = true
+		runs = append(runs, run{tc, "funding_cases"})
+	}
+	for _, rn := range runs {
+		tc, kind := rn.tc, rn.kind
+		t.Run(tc.ID+"/"+kind, func(t *testing.T) {
+			var rename func(json.RawMessage) json.RawMessage
+			path := "/api/v1/futures/fills"
+			switch kind {
+			case "funding":
+				rename, path = toFunding, "/api/v1/futures/funding"
+			case "funding_cases":
+				path = "/api/v1/futures/funding"
+			}
+			// Retries disabled, to show the busy-page retries are a setting of their own, except
+			// where an error answer must be retried with the normal request-retry policy.
+			opts := Options{APIKey: testKey, APISecret: testSecret, NoRetries: true}
+			for _, p := range tc.Pages {
+				if p.HTTPStatus != 0 {
+					opts.NoRetries = false
 				}
-				// Retries disabled: the busy-page retries are a setting of their own.
-				c, rec, fs := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret, NoRetries: true}, pagingServer(t, tc, rename))
-				ctx := context.Background()
-				ids := []string{}
-				var gotErr error
-				if kind == "fills" {
-					for f, err := range c.Futures.AllFills(ctx) {
-						if err != nil {
-							gotErr = err
-							break
-						}
-						ids = append(ids, f.ID)
+			}
+			c, rec, fs := newTestClient(t, opts, pagingServer(t, tc, rename))
+			ctx := context.Background()
+			ids := []string{}
+			var gotErr error
+			if kind == "fills" {
+				for f, err := range c.Futures.AllFills(ctx) {
+					if err != nil {
+						gotErr = err
+						break
 					}
-				} else {
-					for f, err := range c.Futures.AllFunding(ctx) {
-						if err != nil {
-							gotErr = err
-							break
-						}
+					ids = append(ids, f.ID)
+				}
+			} else {
+				for f, err := range c.Futures.AllFunding(ctx) {
+					if err != nil {
+						gotErr = err
+						break
+					}
+					if kind == "funding_cases" {
+						ids = append(ids, strconv.FormatInt(f.Time, 10))
+					} else {
 						ids = append(ids, f.Coin)
 					}
 				}
-				want := tc.Expect.IDs
-				if tc.Expect.ErrorCode != "" {
-					want = tc.Expect.IDsBeforeError
+			}
+			want := tc.Expect.IDs
+			if kind == "funding_cases" {
+				want = []string{}
+				for _, tm := range tc.Expect.Times {
+					want = append(want, strconv.FormatInt(tm, 10))
 				}
-				if want == nil {
-					want = []string{}
+			}
+			if tc.Expect.ErrorCode != "" {
+				want = tc.Expect.IDsBeforeError
+			}
+			if want == nil {
+				want = []string{}
+			}
+			if !reflect.DeepEqual(ids, want) {
+				t.Errorf("ids %v, want %v", ids, want)
+			}
+			if rec.count() != tc.Expect.Requests {
+				t.Errorf("requests %d, want %d", rec.count(), tc.Expect.Requests)
+			}
+			if got := len(fs.all()); got != tc.Expect.Sleeps {
+				t.Errorf("sleeps %d, want %d", got, tc.Expect.Sleeps)
+			}
+			for _, d := range fs.all() {
+				if d < time.Duration(tc.Expect.MinSleep*float64(time.Second)) {
+					t.Errorf("slept %s, want at least %gs", d, tc.Expect.MinSleep)
 				}
-				if !reflect.DeepEqual(ids, want) {
-					t.Errorf("ids %v, want %v", ids, want)
+			}
+			for i := 0; i < rec.count(); i++ {
+				req, _ := rec.get(i)
+				if req.URL.Path != path || req.Header.Get("X-API-Signature") == "" {
+					t.Errorf("request %d: %s signed=%v", i+1, req.URL.Path, req.Header.Get("X-API-Signature") != "")
 				}
-				if rec.count() != tc.Expect.Requests {
-					t.Errorf("requests %d, want %d", rec.count(), tc.Expect.Requests)
+			}
+			if tc.Expect.EncodedQuery2 != "" {
+				req, _ := rec.get(1)
+				if req.URL.RawQuery != tc.Expect.EncodedQuery2 {
+					t.Errorf("request 2 query %q, want %q", req.URL.RawQuery, tc.Expect.EncodedQuery2)
 				}
-				if got := len(fs.all()); got != tc.Expect.Sleeps {
-					t.Errorf("sleeps %d, want %d", got, tc.Expect.Sleeps)
+			}
+			if tc.Expect.ErrorCode == "" {
+				if gotErr != nil {
+					t.Fatalf("unexpected error %v", gotErr)
 				}
-				for i := 0; i < rec.count(); i++ {
-					req, _ := rec.get(i)
-					if req.URL.Path != path || req.Header.Get("X-API-Signature") == "" {
-						t.Errorf("request %d: %s signed=%v", i+1, req.URL.Path, req.Header.Get("X-API-Signature") != "")
-					}
+			} else {
+				var ae *APIError
+				if !errors.As(gotErr, &ae) {
+					t.Fatalf("error %v (%T), want *APIError", gotErr, gotErr)
 				}
-				if tc.Expect.EncodedQuery2 != "" {
-					req, _ := rec.get(1)
-					if req.URL.RawQuery != tc.Expect.EncodedQuery2 {
-						t.Errorf("request 2 query %q, want %q", req.URL.RawQuery, tc.Expect.EncodedQuery2)
-					}
+				if string(ae.Code) != tc.Expect.ErrorCode || (ae.Code != CodePagingStalled && ae.Code != CodePagingCursorRepeated) {
+					t.Errorf("code %s, want %s", ae.Code, tc.Expect.ErrorCode)
 				}
-				if tc.Expect.ErrorCode == "" {
-					if gotErr != nil {
-						t.Fatalf("unexpected error %v", gotErr)
-					}
+				if ae.Retryable != tc.Expect.ErrorRetryable || isRetryable(gotErr) != tc.Expect.ErrorRetryable {
+					t.Errorf("retryable %v/%v, want %v", ae.Retryable, isRetryable(gotErr), tc.Expect.ErrorRetryable)
+				}
+				last := tc.Pages[len(tc.Pages)-1].RequestCursor
+				if ae.Status != 0 || last == nil || ae.Details["cursor"] != *last {
+					t.Errorf("status %d details %v", ae.Status, ae.Details)
+				}
+				if !strings.Contains(gotErr.Error(), tc.Expect.ErrorCode) {
+					t.Errorf("message %q", gotErr.Error())
+				}
+			}
+			if tc.Expect.HasAccount != nil && kind != "funding" {
+				// The iterator cannot say why it ended: one page through Fills does.
+				c2, _, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret}, pagingServer(t, tc, nil))
+				var has bool
+				var err error
+				if kind == "fills" {
+					p, e := c2.Futures.Fills(ctx, "")
+					has, err = p.HasAccount, e
 				} else {
-					var ae *APIError
-					if !errors.As(gotErr, &ae) {
-						t.Fatalf("error %v (%T), want *APIError", gotErr, gotErr)
-					}
-					if string(ae.Code) != tc.Expect.ErrorCode || (ae.Code != CodePagingStalled && ae.Code != CodePagingCursorRepeated) {
-						t.Errorf("code %s, want %s", ae.Code, tc.Expect.ErrorCode)
-					}
-					if ae.Retryable != tc.Expect.ErrorRetryable || isRetryable(gotErr) != tc.Expect.ErrorRetryable {
-						t.Errorf("retryable %v/%v, want %v", ae.Retryable, isRetryable(gotErr), tc.Expect.ErrorRetryable)
-					}
-					last := tc.Pages[len(tc.Pages)-1].RequestCursor
-					if ae.Status != 0 || last == nil || ae.Details["cursor"] != *last {
-						t.Errorf("status %d details %v", ae.Status, ae.Details)
-					}
-					if !strings.Contains(gotErr.Error(), tc.Expect.ErrorCode) {
-						t.Errorf("message %q", gotErr.Error())
-					}
+					p, e := c2.Futures.Funding(ctx, "")
+					has, err = p.HasAccount, e
 				}
-				if tc.Expect.HasAccount != nil && kind == "fills" {
-					// The iterator cannot say why it ended: one page through Fills does.
-					c2, _, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret}, pagingServer(t, tc, nil))
-					p, err := c2.Futures.Fills(ctx, "")
-					if err != nil || p.HasAccount != *tc.Expect.HasAccount {
-						t.Errorf("has_account %v (%v), want %v", p.HasAccount, err, *tc.Expect.HasAccount)
-					}
+				if err != nil || has != *tc.Expect.HasAccount {
+					t.Errorf("has_account %v (%v), want %v", has, err, *tc.Expect.HasAccount)
 				}
-			})
-		}
+			}
+		})
 	}
 	for _, id := range []string{"short_pages_until_null", "cursor_sent_back_verbatim", "busy_provider_same_cursor_retried",
-		"busy_provider_gives_up_after_max_retries", "nonempty_page_repeating_cursor_fails", "no_futures_account"} {
+		"busy_provider_gives_up_after_max_retries", "nonempty_page_repeating_cursor_fails", "no_futures_account",
+		"real_cursor_formats", "unavailable_mid_paging_retried", "funding_short_pages_until_null", "funding_busy_then_rows",
+		"funding_no_account"} {
 		if !seen[id] {
 			t.Errorf("case %s missing from the conformance file", id)
 		}
