@@ -27,8 +27,12 @@ const SupportedProtocolVersion = 1
 
 const maxChannelLength = 64
 
-// PrivateChannels need Auth with a session access token.
-var PrivateChannels = map[string]bool{"orders": true, "balances": true, "deposits": true, "withdrawals": true, "account": true}
+// maxPingInterval: the server closes a connection silent for 90 to 120 s.
+const maxPingInterval = 60 * time.Second
+
+// PrivateChannels need Auth with a session access token, or AuthKey.
+var PrivateChannels = map[string]bool{"orders": true, "balances": true, "deposits": true, "withdrawals": true, "account": true,
+	FuturesAccountChannel: true}
 
 var knownEventTypes = map[string]bool{
 	"ticker.update": true, "orderbook.update": true, "trade.new": true, "market.status": true,
@@ -36,6 +40,9 @@ var knownEventTypes = map[string]bool{
 	"balance.updated": true, "deposit.detected": true, "deposit.updated": true, "deposit.completed": true,
 	"withdrawal.updated": true, "session.revoked": true,
 	"balances.resync": true, "deposits.resync": true, "withdrawals.resync": true,
+	// Futures (see ws_futures.go).
+	"futures.mids": true, "futures.orderbook.update": true, "futures.trades.new": true, "futures.candle.update": true,
+	"futures.status": true, "futures.positions": true, "futures.orders": true, "futures.resync": true,
 }
 
 // WSError is a WebSocket protocol error, a server error frame (FromServer), or a local guard.
@@ -244,6 +251,12 @@ type WSHandlers struct {
 	// A private channel skipped sequence numbers on this connection (after the reorder window):
 	// events were lost. Followed by OnResync(ResyncSequenceGap); refetch that channel's state.
 	OnSequenceGap func(SequenceGap)
+	// futures.resync arrived on channel: data on it may have been missed; refetch it over REST
+	// (the event itself also goes to OnEvent). Public futures channels stay subscribed. For
+	// futures.account the client then unsubscribes and subscribes again by itself (the server's
+	// poller stopped); a refusal of that subscribe is reported (OnServerError and OnError) and the
+	// channel is no longer held.
+	OnFuturesResync func(channel string)
 }
 
 // WSOptions configures a WebSocket.
@@ -252,7 +265,8 @@ type WSOptions struct {
 	URL string
 	// Allow ws://, but ONLY for localhost, 127.0.0.1 or ::1 (local test servers).
 	AllowInsecure bool
-	// Client ping cadence, required by the server. Default 30 s.
+	// Client ping cadence, required by the server (it closes connections silent for 90 s).
+	// Default 30 s; at most 60 s (a longer value is lowered to 60 s).
 	PingInterval time.Duration
 	// Reconnect when no frame arrives for this long. Default 75 s.
 	LivenessTimeout time.Duration
@@ -302,6 +316,9 @@ type wsPending struct {
 	kind     string // auth, subscribe, unsubscribe, ping
 	channels []string
 	done     chan wsAck
+	// Error frames with this subscribe's id. The server sends one per refused channel, BEFORE
+	// its single subscribed ack, and no ack at all when it accepted nothing.
+	refusals []*WSError
 }
 
 type wsAck struct {
@@ -373,6 +390,7 @@ func NewWebSocket(opts WSOptions) (*WebSocket, error) {
 		}
 	}
 	def(&opts.PingInterval, 30*time.Second)
+	opts.PingInterval = min(opts.PingInterval, maxPingInterval)
 	def(&opts.LivenessTimeout, 75*time.Second)
 	def(&opts.WelcomeTimeout, 10*time.Second)
 	def(&opts.AckTimeout, 5*time.Second)
@@ -589,7 +607,18 @@ func (w *WebSocket) onWelcome(welcome Welcome) {
 				}
 			}
 			if len(channels) > 0 {
-				if _, err := w.sendSubscribe(ctx, channels); err != nil {
+				added, err := w.sendSubscribe(ctx, channels)
+				if refusedByServer(err) {
+					// A refused futures channel is not retried: it is no longer held.
+					w.mu.Lock()
+					for _, c := range channels {
+						if strings.HasPrefix(c, "futures.") && !slices.Contains(added, c) {
+							w.drop(c)
+						}
+					}
+					w.mu.Unlock()
+				}
+				if err != nil {
 					w.emitError(err)
 				}
 			}
@@ -614,7 +643,7 @@ func (w *WebSocket) onWelcome(welcome Welcome) {
 // server's authenticated acknowledgement; it fails on an error frame with the request id (the
 // token is then forgotten) or when no acknowledgement arrives within AckTimeout. The token is
 // kept in memory and re-sent after each reconnect. When not connected, the token is queued
-// and Queued is true. (API-key authentication is not available on the WebSocket yet.)
+// and Queued is true. (For an API key, use AuthKey.)
 func (w *WebSocket) Auth(ctx context.Context, token string) (AuthResult, error) {
 	if token == "" {
 		return AuthResult{}, &WSError{Code: "CONFIG", Message: "Auth: token is required"}
@@ -745,22 +774,33 @@ func (w *WebSocket) Subscribe(ctx context.Context, channels ...string) (Subscrib
 	room := max(0, w.opts.MaxSubscriptions-len(w.channels)-len(w.pendingPrivate))
 	accepted := fresh[:min(room, len(fresh))]
 	res.Refused = fresh[len(accepted):]
-	w.channels = append(w.channels, accepted...)
+	var send []string
+	for _, c := range accepted {
+		if c == FuturesAccountChannel && w.authUserID == "" {
+			// Held until Auth or AuthKey succeeds, then subscribed (see PendingChannels).
+			w.pendingPrivate = addUnique(w.pendingPrivate, c)
+			continue
+		}
+		w.channels = append(w.channels, c)
+		send = append(send, c)
+	}
 	connected := w.conn != nil && w.welcome != nil
 	w.mu.Unlock()
 	if len(res.Refused) > 0 {
 		w.log.Warn("cexy: WebSocket subscription cap reached", "cap", w.opts.MaxSubscriptions, "refused", res.Refused)
 	}
-	if len(accepted) == 0 || !connected {
+	if len(send) == 0 || !connected {
 		return res, nil
 	}
-	added, err := w.sendSubscribe(ctx, accepted)
-	var we *WSError
-	if errors.As(err, &we) && we.FromServer {
-		// Refused by the server (e.g. UNAUTHENTICATED for a private channel): not held.
+	added, err := w.sendSubscribe(ctx, send)
+	if refusedByServer(err) {
+		// Refused by the server (e.g. UNAUTHENTICATED for a private channel, RATE_LIMITED for a
+		// futures feed): those channels are not held, and not retried.
 		w.mu.Lock()
-		for _, c := range accepted {
-			w.drop(c)
+		for _, c := range send {
+			if !slices.Contains(added, c) {
+				w.drop(c)
+			}
 		}
 		w.mu.Unlock()
 	}
@@ -1038,11 +1078,20 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 			if late || (ok && p.kind == "auth_key") {
 				w.keyAuth = false // a refused key is not tried again automatically
 			}
+			// A subscribe gets one error per refused channel before its ack: it completes on the
+			// ack, or here once every channel was refused (then no ack follows).
+			waitAck := false
+			if ok && p.kind == "subscribe" {
+				p.refusals = append(p.refusals, werr)
+				waitAck = len(p.refusals) < len(p.channels)
+			}
 			w.mu.Unlock()
 			if isAuth {
 				w.signedOut(AuthFailed, code)
 			}
-			w.settle(id, "", nil, werr)
+			if !waitAck {
+				w.settle(id, "", nil, werr)
+			}
 		}
 		w.dispatch(func() {
 			if w.h.OnServerError != nil {
@@ -1081,6 +1130,9 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 		w.trackSeq(ev.Channel, *ev.Sequence)
 	}
 	switch ev.Type {
+	case "futures.resync":
+		w.onFuturesResync(ev)
+		return
 	case "balances.resync", "deposits.resync", "withdrawals.resync":
 		reason := ResyncReason(strings.ReplaceAll(ev.Type, ".", "_"))
 		w.dispatch(func() {
@@ -1288,15 +1340,19 @@ func (w *WebSocket) onAuthenticated(userID string) {
 	}
 	// Not on the read loop: the acknowledgement arrives through it.
 	go func() {
-		_, err := w.sendSubscribe(context.Background(), channels)
+		added, err := w.sendSubscribe(context.Background(), channels)
 		var we *WSError
 		if errors.As(err, &we) && we.FromServer {
-			// Refused by the server (e.g. signed out again meanwhile): back to pending.
+			// Refused by the server (e.g. signed out again meanwhile): back to pending. A
+			// futures.account refused for another reason (NOT_FOUND "No futures account",
+			// RATE_LIMITED) is not retried: it is no longer held.
 			w.mu.Lock()
 			for _, c := range channels {
-				if w.holds(c) {
+				if w.holds(c) && !slices.Contains(added, c) {
 					w.drop(c)
-					w.pendingPrivate = addUnique(w.pendingPrivate, c)
+					if c != FuturesAccountChannel || we.Code == "UNAUTHENTICATED" {
+						w.pendingPrivate = addUnique(w.pendingPrivate, c)
+					}
 				}
 			}
 			w.mu.Unlock()
@@ -1322,6 +1378,9 @@ func (w *WebSocket) settle(id, kind string, frame map[string]any, err error) {
 		return
 	}
 	delete(w.pending, id)
+	if len(p.refusals) > 0 {
+		err = p.refusals[0] // the channels missing from the ack were refused
+	}
 	w.mu.Unlock()
 	p.done <- wsAck{frame: frame, err: err}
 }
@@ -1331,8 +1390,12 @@ func (w *WebSocket) settleByChannel(kind string, channels []string, frame map[st
 	for id, p := range w.pending {
 		if p.kind == kind && overlaps(p.channels, channels) {
 			delete(w.pending, id)
+			var err error
+			if len(p.refusals) > 0 {
+				err = p.refusals[0]
+			}
 			w.mu.Unlock()
-			p.done <- wsAck{frame: frame}
+			p.done <- wsAck{frame: frame, err: err}
 			return
 		}
 	}
@@ -1343,6 +1406,22 @@ func (w *WebSocket) settleByChannel(kind string, channels []string, frame map[st
 // an error frame with that id. With strict, no acknowledgement within AckTimeout is an error;
 // otherwise it returns a nil frame.
 func (w *WebSocket) request(ctx context.Context, kind string, payload map[string]any, channels []string, strict bool) (map[string]any, error) {
+	r, err := w.begin(ctx, kind, payload, channels)
+	if err != nil {
+		return nil, err
+	}
+	return w.wait(ctx, r, strict)
+}
+
+type wsRequest struct {
+	id   string
+	kind string
+	p    *wsPending
+}
+
+// begin sends a request; wait collects its acknowledgement. Splitting them lets frames that
+// must reach the server in order be written back to back.
+func (w *WebSocket) begin(ctx context.Context, kind string, payload map[string]any, channels []string) (*wsRequest, error) {
 	w.mu.Lock()
 	id := strconv.Itoa(w.nextID)
 	w.nextID++
@@ -1361,35 +1440,62 @@ func (w *WebSocket) request(ctx context.Context, kind string, payload map[string
 		w.mu.Unlock()
 		return nil, err
 	}
+	return &wsRequest{id: id, kind: kind, p: p}, nil
+}
+
+func (w *WebSocket) wait(ctx context.Context, r *wsRequest, strict bool) (map[string]any, error) {
 	t := time.NewTimer(w.opts.AckTimeout)
 	defer t.Stop()
+	// abandon gives up on the acknowledgement; error frames already received for a subscribe
+	// mean the server refused every channel it got to.
+	abandon := func() error {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		if w.pending[r.id] == r.p {
+			delete(w.pending, r.id)
+		}
+		if len(r.p.refusals) > 0 {
+			return r.p.refusals[0]
+		}
+		return nil
+	}
 	select {
-	case ack := <-p.done:
+	case ack := <-r.p.done:
 		return ack.frame, ack.err
 	case <-t.C:
-		w.mu.Lock()
-		delete(w.pending, id)
-		w.mu.Unlock()
+		if err := abandon(); err != nil {
+			return nil, err
+		}
 		if strict {
-			return nil, &WSError{Code: "TIMEOUT", Message: fmt.Sprintf("no %s acknowledgement for %s (id %s)", ackType[kind], kind, id)}
+			return nil, &WSError{Code: "TIMEOUT", Message: fmt.Sprintf("no %s acknowledgement for %s (id %s)", ackType[r.kind], r.kind, r.id)}
 		}
 		return nil, nil
 	case <-ctx.Done():
-		w.mu.Lock()
-		delete(w.pending, id)
-		w.mu.Unlock()
+		_ = abandon()
 		return nil, ctx.Err()
 	}
 }
 
 // sendSubscribe returns the channels the server confirmed. subscribed is sent only when
-// something was added: silence means nothing new.
+// something was added: silence means nothing new. When the server refused some channels, err is
+// the first refusal (a server *WSError) and the refused channels are those missing from the
+// returned list.
 func (w *WebSocket) sendSubscribe(ctx context.Context, channels []string) ([]string, error) {
 	ack, err := w.request(ctx, "subscribe", map[string]any{"channels": channels}, channels, false)
-	if err != nil || ack == nil {
-		return []string{}, err
+	return subscribed(ack), err
+}
+
+func subscribed(ack map[string]any) []string {
+	if ack == nil {
+		return []string{}
 	}
-	return stringList(ack["channels"]), nil
+	return stringList(ack["channels"])
+}
+
+// refusedByServer: err is a server error frame (a refusal), not a timeout or a disconnect.
+func refusedByServer(err error) bool {
+	var we *WSError
+	return errors.As(err, &we) && we.FromServer
 }
 
 func (w *WebSocket) send(ctx context.Context, frame map[string]any) error {

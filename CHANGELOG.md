@@ -18,10 +18,37 @@ All notable changes to this project are documented here. The format follows
   `conformance/futures/history_paging.json`): the opaque cursor is sent back verbatim (RFC 3986
   in the query) until `next_cursor` is null, short and empty pages included. An empty page that
   returns the cursor just sent means the provider is busy: the iterator backs off and retries the
-  same cursor up to the client's retry count (default 3), then yields a retryable `*APIError` with
-  code `CodePagingStalled` (`PAGING_STALLED`, `Status` 0, `Details["cursor"]` to resume). Without a
-  futures account (`has_account` false) they end with no rows.
+  same cursor up to `WithMaxBusyRetries(n)` times (default 3, a setting of its own: a client with
+  `NoRetries` still rides out a busy provider; each wait goes to `Options.OnRetry`), then yields a
+  retryable `*APIError` with code `CodePagingStalled` (`PAGING_STALLED`, `Status` 0,
+  `Details["cursor"]` to resume). A page with rows that returns the cursor just sent yields its rows,
+  then a non-retryable `CodePagingCursorRepeated` (`PAGING_CURSOR_REPEATED`) error: the iterator
+  never loops. Without a futures account (`has_account` false) they end with no rows.
 - `APIError.Error` omits the status for an error made by the SDK (`Status` 0).
+- Futures WebSocket channels (spec `conformance/ws/futures.json`): `futures.mids`,
+  `futures.orderbook:{coin}`, `futures.trades:{coin}`, `futures.candles:{coin}:{interval}`,
+  `futures.status` and the private `futures.account`. Channel helpers (`FuturesMidsChannel`,
+  `FuturesOrderBookChannel`, `FuturesTradesChannel`, `FuturesCandlesChannel`,
+  `FuturesStatusChannel`, `FuturesAccountChannel`) check the coin and interval locally
+  (`*ConfigError`, nothing sent). The futures event types are delivered to `OnEvent`, with data
+  types `FuturesMids`, `FuturesBookUpdate`, `FuturesTradesUpdate`, `FuturesCandleUpdate`,
+  `FuturesStatus`, `FuturesPositionsUpdate` and `FuturesOrdersUpdate`.
+- `futures.account` is in `PrivateChannels`. Subscribed while signed out it is held
+  (`WebSocket.PendingChannels`) until `Auth` or `AuthKey` succeeds.
+- `futures.resync` goes to `OnEvent` and the new `OnFuturesResync(channel)` handler. On
+  `futures.account` the client also sends unsubscribe then subscribe (the server's poller stopped);
+  a refusal is reported and the channel is no longer held. Refused futures subscribes are not
+  retried, also not on reconnect.
+
+### Changed
+- `PingInterval` is capped at 60 s (the server closes connections silent for 90 s).
+
+### Fixed
+- A WebSocket subscribe with several channels that the server partly refuses: the server sends an
+  error frame per refused channel before its single `subscribed` ack (and no ack when it accepted
+  nothing). `Subscribe` now waits for the ack, returns the accepted channels in `Added` with the
+  first refusal as the error, and keeps holding the accepted ones. It used to fail on the first
+  error frame and drop every channel of the request.
 
 ## [0.1.0-dev.9] (2026-10-01)
 

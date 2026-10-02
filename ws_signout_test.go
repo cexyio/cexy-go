@@ -31,9 +31,10 @@ type signoutStep struct {
 
 // scriptedWS answers only pings; the script sends every other frame.
 type scriptedWS struct {
-	mu       sync.Mutex
-	conn     *websocket.Conn
-	received []map[string]any
+	mu        sync.Mutex
+	conn      *websocket.Conn
+	received  []map[string]any
+	challenge string // sent in the welcome when set (AuthKey)
 }
 
 func (s *scriptedWS) handler(w http.ResponseWriter, r *http.Request) {
@@ -44,8 +45,12 @@ func (s *scriptedWS) handler(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.conn = c
 	s.mu.Unlock()
-	s.write(map[string]any{"type": "welcome", "protocol_version": 1, "heartbeat_interval_seconds": 30,
-		"max_subscriptions": 100, "connection_id": "c1"})
+	welcome := map[string]any{"type": "welcome", "protocol_version": 1, "heartbeat_interval_seconds": 30,
+		"max_subscriptions": 100, "connection_id": "c1"}
+	if s.challenge != "" {
+		welcome["challenge"] = s.challenge
+	}
+	s.write(welcome)
 	for {
 		_, data, err := c.Read(context.Background())
 		if err != nil {

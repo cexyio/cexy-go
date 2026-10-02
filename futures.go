@@ -81,11 +81,15 @@ func (s *FuturesService) Funding(ctx context.Context, cursor string, opts ...Cal
 }
 
 // AllFills iterates over the account's fills, newest first, fetching pages as needed. It ends
-// at the last page, or at once (no rows) when the account has no futures account. While the
-// futures provider is busy the server answers an empty page that hands back the cursor it was
-// given; the iterator then waits (the client's backoff) and asks again, at most the client's
-// retry count in a row (default 3), then yields a retryable *APIError with code
-// CodePagingStalled (its Details["cursor"] resumes the listing through Fills).
+// at the last page, or at once (no rows) when the account has no futures account.
+//
+// While the futures provider is busy the server answers an empty page that hands back the
+// cursor it was given: the iterator waits (the client's backoff, reported to Options.OnRetry
+// with the PAGING_STALLED error as Err) and asks again, at most WithMaxBusyRetries times in a
+// row (default 3, independent of the client's retry count), then yields a retryable *APIError
+// with code CodePagingStalled. A page with rows that hands back the cursor it was given is a
+// server error: its rows are yielded, then a non-retryable *APIError with code
+// CodePagingCursorRepeated. Both carry Details["cursor"], which resumes the listing through Fills.
 func (s *FuturesService) AllFills(ctx context.Context, opts ...IterOption) iter.Seq2[FuturesFill, error] {
 	o := iterOpts(opts)
 	return pageHistory(ctx, s.t, OpFills, o, func(ctx context.Context, cursor string) ([]FuturesFill, bool, *string, error) {
@@ -110,15 +114,24 @@ func optCursor(c string) *string {
 	return &c
 }
 
+// DefaultMaxBusyRetries is how many times in a row AllFills and AllFunding ask again for a page
+// while the futures provider is busy (see WithMaxBusyRetries).
+const DefaultMaxBusyRetries = 3
+
 // pageHistory walks a futures history listing (conformance/futures/history_paging.json): the
-// first request sends no cursor, each next_cursor is sent back verbatim until it is null, and an
+// first request sends no cursor, each next_cursor is sent back verbatim until it is null; an
 // empty page whose next_cursor is the cursor just sent means the provider is busy: back off and
-// ask again, at most maxRetries times in a row, then fail with PAGING_STALLED.
+// ask again, at most maxBusyRetries times in a row, then fail with PAGING_STALLED; a page with
+// rows whose next_cursor is the cursor just sent yields its rows, then fails with
+// PAGING_CURSOR_REPEATED (never loop).
 func pageHistory[T any](ctx context.Context, t *transport, op OperationID, o iterOptions,
 	fetch func(ctx context.Context, cursor string) (rows []T, hasAccount bool, next *string, err error)) iter.Seq2[T, error] {
 	return func(yield func(T, error) bool) {
 		var zero T
-		maxRetries := t.options(o.call).maxRetries
+		maxBusy := DefaultMaxBusyRetries
+		if o.maxBusyRetries != nil {
+			maxBusy = max(0, *o.maxBusyRetries)
+		}
 		cursor := ""
 		stalls, n := 0, 0
 		for {
@@ -130,9 +143,10 @@ func pageHistory[T any](ctx context.Context, t *transport, op OperationID, o ite
 			if !hasAccount {
 				return
 			}
-			if len(rows) == 0 && cursor != "" && next != nil && *next == cursor {
-				stalled := pagingStalled(op, cursor, stalls+1)
-				if stalls >= maxRetries {
+			repeated := cursor != "" && next != nil && *next == cursor
+			if repeated && len(rows) == 0 {
+				stalled := pagingError(CodePagingStalled, op, cursor, stalls+1)
+				if stalls >= maxBusy {
 					yield(zero, stalled)
 					return
 				}
@@ -153,6 +167,10 @@ func pageHistory[T any](ctx context.Context, t *transport, op OperationID, o ite
 				}
 				n++
 			}
+			if repeated {
+				yield(zero, pagingError(CodePagingCursorRepeated, op, cursor, 1))
+				return
+			}
 			if next == nil || *next == "" || (o.maxItems > 0 && n >= o.maxItems) {
 				return
 			}
@@ -162,17 +180,26 @@ func pageHistory[T any](ctx context.Context, t *transport, op OperationID, o ite
 }
 
 // CodePagingStalled is the code of the *APIError that AllFills and AllFunding yield when the
-// futures provider stays busy: the same cursor came back with no rows more times in a row than
-// the client retries. It is made by the SDK, not sent by the API (Status 0). It is retryable:
-// resume later from Details["cursor"] (a string) with Fills or Funding.
+// futures provider stays busy: an empty page handed back the cursor just sent more times in a
+// row than WithMaxBusyRetries allows. It is made by the SDK, not sent by the API (Status 0). It
+// is retryable: the rows yielded so far are not the whole history; resume later from
+// Details["cursor"] (a string) with Fills or Funding.
 const CodePagingStalled ErrorCode = "PAGING_STALLED"
 
-func pagingStalled(op OperationID, cursor string, attempts int) *APIError {
-	return &APIError{
-		Code: CodePagingStalled,
-		Message: fmt.Sprintf("%s: the futures provider is busy (an empty page returned the same cursor %d time(s) in a row); "+
-			"retry later from Details[\"cursor\"]", operations[op].Path, attempts),
-		Details:   map[string]any{"cursor": cursor},
-		Retryable: true,
+// CodePagingCursorRepeated is the code of the *APIError that AllFills and AllFunding yield after
+// a page WITH rows handed back the cursor just sent: a server error, since paging on would repeat
+// rows forever. Made by the SDK (Status 0), not retryable. Details["cursor"] is that cursor.
+const CodePagingCursorRepeated ErrorCode = "PAGING_CURSOR_REPEATED"
+
+func pagingError(code ErrorCode, op OperationID, cursor string, attempts int) *APIError {
+	e := &APIError{Code: code, Details: map[string]any{"cursor": cursor}}
+	if code == CodePagingStalled {
+		e.Retryable = true
+		e.Message = fmt.Sprintf("%s: the futures provider is busy (an empty page returned the same cursor %d time(s) in a row); "+
+			"retry later from Details[\"cursor\"]", operations[op].Path, attempts)
+	} else {
+		e.Message = fmt.Sprintf("%s: a page with rows returned the cursor it was sent; stopped so as not to repeat rows",
+			operations[op].Path)
 	}
+	return e
 }

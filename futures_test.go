@@ -210,13 +210,13 @@ func pagingServer(t *testing.T, tc pagingCase, rename func(json.RawMessage) json
 func TestFuturesHistoryPagingConformance(t *testing.T) {
 	dir := specDir(t)
 	var spec struct {
-		Operation  string       `json:"operation"`
-		MaxRetries int          `json:"max_retries"`
-		Cases      []pagingCase `json:"cases"`
+		Operation string       `json:"operation"`
+		MaxBusy   int          `json:"max_busy_retries"`
+		Cases     []pagingCase `json:"cases"`
 	}
 	readJSON(t, filepath.Join(dir, "conformance", "futures", "history_paging.json"), &spec)
-	if spec.Operation != "GET /api/v1/futures/fills" || spec.MaxRetries != 3 || len(spec.Cases) == 0 {
-		t.Fatalf("unexpected file: %s, max_retries %d, %d cases", spec.Operation, spec.MaxRetries, len(spec.Cases))
+	if spec.Operation != "GET /api/v1/futures/fills" || spec.MaxBusy != DefaultMaxBusyRetries || len(spec.Cases) == 0 {
+		t.Fatalf("unexpected file: %s, max_busy_retries %d, %d cases", spec.Operation, spec.MaxBusy, len(spec.Cases))
 	}
 	// Funding rows have no id: the conformance ids are carried in "coin" for the funding run.
 	toFunding := func(b json.RawMessage) json.RawMessage {
@@ -245,7 +245,8 @@ func TestFuturesHistoryPagingConformance(t *testing.T) {
 				if kind == "funding" {
 					rename, path = toFunding, "/api/v1/futures/funding"
 				}
-				c, rec, fs := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret}, pagingServer(t, tc, rename))
+				// Retries disabled: the busy-page retries are a setting of their own.
+				c, rec, fs := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret, NoRetries: true}, pagingServer(t, tc, rename))
 				ctx := context.Background()
 				ids := []string{}
 				var gotErr error
@@ -303,7 +304,7 @@ func TestFuturesHistoryPagingConformance(t *testing.T) {
 					if !errors.As(gotErr, &ae) {
 						t.Fatalf("error %v (%T), want *APIError", gotErr, gotErr)
 					}
-					if string(ae.Code) != tc.Expect.ErrorCode || ae.Code != CodePagingStalled {
+					if string(ae.Code) != tc.Expect.ErrorCode || (ae.Code != CodePagingStalled && ae.Code != CodePagingCursorRepeated) {
 						t.Errorf("code %s, want %s", ae.Code, tc.Expect.ErrorCode)
 					}
 					if ae.Retryable != tc.Expect.ErrorRetryable || isRetryable(gotErr) != tc.Expect.ErrorRetryable {
@@ -313,7 +314,7 @@ func TestFuturesHistoryPagingConformance(t *testing.T) {
 					if ae.Status != 0 || last == nil || ae.Details["cursor"] != *last {
 						t.Errorf("status %d details %v", ae.Status, ae.Details)
 					}
-					if !strings.Contains(gotErr.Error(), "PAGING_STALLED") {
+					if !strings.Contains(gotErr.Error(), tc.Expect.ErrorCode) {
 						t.Errorf("message %q", gotErr.Error())
 					}
 				}
@@ -329,7 +330,7 @@ func TestFuturesHistoryPagingConformance(t *testing.T) {
 		}
 	}
 	for _, id := range []string{"short_pages_until_null", "cursor_sent_back_verbatim", "busy_provider_same_cursor_retried",
-		"busy_provider_gives_up_after_max_retries", "no_futures_account"} {
+		"busy_provider_gives_up_after_max_retries", "nonempty_page_repeating_cursor_fails", "no_futures_account"} {
 		if !seen[id] {
 			t.Errorf("case %s missing from the conformance file", id)
 		}
@@ -346,7 +347,7 @@ func stalledHandler() http.HandlerFunc {
 	}
 }
 
-func TestFuturesPagingRetriesFollowClientSettings(t *testing.T) {
+func TestFuturesBusyRetriesAreTheirOwnSetting(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name     string
@@ -354,9 +355,11 @@ func TestFuturesPagingRetriesFollowClientSettings(t *testing.T) {
 		iter     []IterOption
 		requests int
 	}{
-		{"no retries", Options{NoRetries: true}, nil, 2},
-		{"client max 5", Options{MaxRetries: 5}, nil, 7},
-		{"call option 1", Options{}, []IterOption{WithCallOptions(WithMaxRetries(1))}, 3},
+		{"default with retries off", Options{NoRetries: true}, nil, 5},
+		{"default with client retries 8", Options{MaxRetries: 8}, nil, 5},
+		{"busy 5", Options{NoRetries: true}, []IterOption{WithMaxBusyRetries(5)}, 7},
+		{"busy 0", Options{}, []IterOption{WithMaxBusyRetries(0)}, 2},
+		{"busy 1, call retries 0", Options{}, []IterOption{WithMaxBusyRetries(1), WithCallOptions(WithMaxRetries(0))}, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.opts.APIKey, tc.opts.APISecret = testKey, testSecret
@@ -421,5 +424,27 @@ func TestFuturesPagingServerError(t *testing.T) {
 	var ae *APIError
 	if !errors.As(got, &ae) || ae.Status != 503 || !ae.Retryable || !errors.Is(got, ErrServer) || rec.count() != 1 {
 		t.Fatalf("err %v requests %d", got, rec.count())
+	}
+}
+
+func TestFuturesRepeatedCursorWithRowsStops(t *testing.T) {
+	c, rec, fs := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret}, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, dataEnv(map[string]any{"has_account": true, "funding": []any{map[string]any{"coin": "BTC"}}, "next_cursor": "same"}))
+	})
+	n := 0
+	var got error
+	for _, err := range c.Futures.AllFunding(context.Background()) {
+		if err != nil {
+			got = err
+			break
+		}
+		n++
+	}
+	var ae *APIError
+	if !errors.As(got, &ae) || ae.Code != CodePagingCursorRepeated || ae.Retryable || isRetryable(got) || ae.Details["cursor"] != "same" {
+		t.Fatalf("err %v", got)
+	}
+	if n != 2 || rec.count() != 2 || len(fs.all()) != 0 {
+		t.Fatalf("rows %d requests %d sleeps %d", n, rec.count(), len(fs.all()))
 	}
 }
