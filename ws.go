@@ -152,9 +152,9 @@ const (
 	ResyncSequenceGap ResyncReason = "sequence_gap"
 	// ResyncBalancesResync: balances.resync, the server could not resume its balance change stream.
 	ResyncBalancesResync ResyncReason = "balances_resync"
-	// ResyncDepositsResync: deposits.resync (planned server frame), refetch the deposit list.
+	// ResyncDepositsResync: deposits.resync: refetch the deposit list.
 	ResyncDepositsResync ResyncReason = "deposits_resync"
-	// ResyncWithdrawalsResync: withdrawals.resync (planned server frame), refetch the withdrawal list.
+	// ResyncWithdrawalsResync: withdrawals.resync: refetch the withdrawal list.
 	ResyncWithdrawalsResync ResyncReason = "withdrawals_resync"
 )
 
@@ -1043,7 +1043,7 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 		})
 		return
 	case "signed_out":
-		// signed_out (a planned server frame): the server signed this connection out (token
+		// signed_out: the server signed this connection out (token
 		// expired, session revoked, or a future reason). Private subscriptions are gone; a fresh
 		// Auth on this socket restores them.
 		raw, _ := frame["reason"].(string)
