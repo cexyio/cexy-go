@@ -152,9 +152,9 @@ const (
 	ResyncSequenceGap ResyncReason = "sequence_gap"
 	// ResyncBalancesResync: balances.resync, the server could not resume its balance change stream.
 	ResyncBalancesResync ResyncReason = "balances_resync"
-	// ResyncDepositsResync: deposits.resync (planned server frame), refetch the deposit list.
+	// ResyncDepositsResync: deposits.resync: refetch the deposit list.
 	ResyncDepositsResync ResyncReason = "deposits_resync"
-	// ResyncWithdrawalsResync: withdrawals.resync (planned server frame), refetch the withdrawal list.
+	// ResyncWithdrawalsResync: withdrawals.resync: refetch the withdrawal list.
 	ResyncWithdrawalsResync ResyncReason = "withdrawals_resync"
 )
 
@@ -1043,7 +1043,7 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 		})
 		return
 	case "signed_out":
-		// signed_out (a planned server frame): the server signed this connection out (token
+		// signed_out: the server signed this connection out (token
 		// expired, session revoked, or a future reason). Private subscriptions are gone; a fresh
 		// Auth on this socket restores them.
 		raw, _ := frame["reason"].(string)
@@ -1052,7 +1052,16 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 		}
 		w.mu.Lock()
 		w.token = ""
+		if raw == string(AuthKeyRevoked) || raw == string(AuthKeyExpired) {
+			w.keyAuth = false // the key cannot sign in again
+		}
+		// Already signed out: session.revoked {current: true} precedes signed_out
+		// {reason: revoked}, and the pair is one sign-out.
+		already := w.authUserID == ""
 		w.mu.Unlock()
+		if already {
+			return
+		}
 		switch raw {
 		case "revoked":
 			w.signedOut(AuthSessionRevoked, "")
@@ -1066,9 +1075,6 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 		case "expired":
 			w.signedOut(AuthTokenExpired, "")
 		case string(AuthKeyRevoked), string(AuthKeyExpired):
-			w.mu.Lock()
-			w.keyAuth = false // the key cannot sign in again
-			w.mu.Unlock()
 			w.signedOut(AuthChangeReason(raw), "")
 		default:
 			w.signedOut(AuthSignedOut, raw)
