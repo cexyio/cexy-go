@@ -1052,7 +1052,16 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 		}
 		w.mu.Lock()
 		w.token = ""
+		if raw == string(AuthKeyRevoked) || raw == string(AuthKeyExpired) {
+			w.keyAuth = false // the key cannot sign in again
+		}
+		// Already signed out: session.revoked {current: true} precedes signed_out
+		// {reason: revoked}, and the pair is one sign-out.
+		already := w.authUserID == ""
 		w.mu.Unlock()
+		if already {
+			return
+		}
 		switch raw {
 		case "revoked":
 			w.signedOut(AuthSessionRevoked, "")
@@ -1066,9 +1075,6 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 		case "expired":
 			w.signedOut(AuthTokenExpired, "")
 		case string(AuthKeyRevoked), string(AuthKeyExpired):
-			w.mu.Lock()
-			w.keyAuth = false // the key cannot sign in again
-			w.mu.Unlock()
 			w.signedOut(AuthChangeReason(raw), "")
 		default:
 			w.signedOut(AuthSignedOut, raw)
