@@ -791,6 +791,7 @@ const (
 	NotificationKindWithdrawalCompleted NotificationKind = "withdrawal_completed"
 	NotificationKindWithdrawalFailed    NotificationKind = "withdrawal_failed"
 	NotificationKindOrderFilled         NotificationKind = "order_filled"
+	NotificationKindOrderClosed         NotificationKind = "order_closed"
 	NotificationKindSecurity            NotificationKind = "security"
 	NotificationKindListingDecision     NotificationKind = "listing_decision"
 	NotificationKindAnnouncement        NotificationKind = "announcement"
