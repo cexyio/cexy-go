@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-dev.12] (2026-10-07)
+
 ### Added
 - `Trading.CancelAllAfter` and `Trading.CancelAllAfterMarkets`: arm, re-arm or disarm the dead-man switch
   (`POST /trading/orders/cancel-all-after`), with the `CancelAllAfter` result type. Retried after connection
