@@ -14,7 +14,7 @@ The official Go SDK for the [CEXY.io](https://cexy.io) REST and WebSocket API.
 ## Install
 
 ```bash
-go get github.com/cexyio/cexy-go@v0.1.0-dev.11
+go get github.com/cexyio/cexy-go@v0.1.0-dev.12
 ```
 
 ```go
