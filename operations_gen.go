@@ -16,6 +16,7 @@ type OperationID string
 
 const (
 	OpCancelAll               OperationID = "cancel_all"
+	OpCancelAllAfter          OperationID = "cancel_all_after"
 	OpCancelOrder             OperationID = "cancel_order"
 	OpCandles                 OperationID = "candles"
 	OpDepositAddress          OperationID = "deposit_address"
@@ -71,6 +72,7 @@ const (
 // operations is the SDK surface: exactly the operations in openapi.sdk.json.
 var operations = map[OperationID]OperationInfo{
 	OpCancelAll:               {Method: "POST", Path: "/api/v1/trading/orders/cancel-all", Auth: "api_key", Scope: "trade"},
+	OpCancelAllAfter:          {Method: "POST", Path: "/api/v1/trading/orders/cancel-all-after", Auth: "api_key", Scope: "trade"},
 	OpCancelOrder:             {Method: "DELETE", Path: "/api/v1/trading/orders/{order_id}", Auth: "api_key", Scope: "trade"},
 	OpCandles:                 {Method: "GET", Path: "/api/v1/futures/markets/{coin}/candles", Auth: "none", Scope: ""},
 	OpDepositAddress:          {Method: "GET", Path: "/api/v1/wallet/deposit-address", Auth: "api_key", Scope: "read"},
@@ -165,6 +167,7 @@ const (
 	CodeEvidenceContradicts    ErrorCode = "EVIDENCE_CONTRADICTS"
 	CodeAmountMismatch         ErrorCode = "AMOUNT_MISMATCH"
 	CodeConcurrentModification ErrorCode = "CONCURRENT_MODIFICATION"
+	CodeDeadManNotArmed        ErrorCode = "DEAD_MAN_NOT_ARMED"
 	CodeInsufficientFunds      ErrorCode = "INSUFFICIENT_FUNDS"
 	CodeInsufficientFeeFunds   ErrorCode = "INSUFFICIENT_FEE_FUNDS"
 	CodeMarketUnavailable      ErrorCode = "MARKET_UNAVAILABLE"
@@ -217,6 +220,7 @@ var knownErrorCodes = map[ErrorCode]bool{
 	CodeEvidenceContradicts:    true,
 	CodeAmountMismatch:         true,
 	CodeConcurrentModification: true,
+	CodeDeadManNotArmed:        true,
 	CodeInsufficientFunds:      true,
 	CodeInsufficientFeeFunds:   true,
 	CodeMarketUnavailable:      true,

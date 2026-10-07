@@ -69,6 +69,24 @@ separate method, `CancelAllMarkets`. The server allows cancel-all 30 times a min
 Cancel-all also cancels stop orders that have not triggered yet (status `pending_trigger`) and
 releases their reservations, so nothing fires into the market after the call.
 
+### Dead-man switch
+
+`CancelAllAfter` arms a timer: if you do not arm again before it runs out, the server cancels the open
+orders in scope. `timeout` of 0 disarms.
+
+```go
+// Arm every ~2 s with a 10 s timeout. Time the local deadline from when the call started.
+res, err := c.Trading.CancelAllAfter(ctx, "BTC/USDT", 10*time.Second) // CancelAllAfterMarkets(ctx, d) = every market
+_, err = c.Trading.CancelAllAfter(ctx, "BTC/USDT", 0)                 // disarm this market only
+```
+
+A blank symbol is refused (use `CancelAllAfterMarkets`), and so is a timeout that is negative, below 1 ms
+or not a whole number of milliseconds; the server checks the 5 s to 10 min range. Per-market and
+all-markets switches are separate. A fired switch is cleared: arm again before quoting. Never compare the
+local clock with `Deadline`. After a retried arm, disarm once more if the switch must be off; no endpoint
+reads it. A house account placing an order without an armed switch gets `ErrDeadManNotArmed`
+(`DEAD_MAN_NOT_ARMED`, 409, not retried): stop quoting.
+
 One cancel-all call handles at most 500 orders. Each order it handled is in exactly one of
 `Cancelled`, `AlreadyClosed` (it closed on its own first; not an error) and `Failed`, with the
 reason in `Failures` (`INVALID_STATE` means the order was still being placed). `HasMore` means
@@ -99,7 +117,7 @@ Give both `APIKey` and `APISecret`, or neither: `New` returns a `*ConfigError` f
 | `Exports` | `Deposits`, `Ledger`, `Orders`, `Trades`, `Withdrawals` (CSV text) | read |
 | `Wallet` | `Deposits`, `Deposit`, `Withdrawals`, `Withdrawal`, `WithdrawalAddresses`, `DepositAddress` (+ iterators) | read |
 | `Trading` | `OpenOrders`, `Order`, `OrderByClientID`, `OrderHistory`, `Trades` (+ iterators) | read |
-| `Trading` | `PlaceOrder`, `CancelOrder`, `CancelAll`, `CancelAllMarkets`, `CancelAllUntilDone` | trade |
+| `Trading` | `PlaceOrder`, `CancelOrder`, `CancelAll`, `CancelAllMarkets`, `CancelAllUntilDone`, `CancelAllAfter`, `CancelAllAfterMarkets` | trade |
 | `Pools` | `Join`, `Exit` | trade |
 
 `Wallet.DepositAddress` **creates** the address on the first call for that asset and network (later
@@ -177,7 +195,7 @@ case err != nil:
   never blocks longer than `MaxServerWait` because of a server hint.
 - GETs retry freely.
 - **Idempotency-Key** is sent only on pool join and exit, the only endpoints that honour it. Orders,
-  order cancels and cancel-all send none.
+  order cancels, cancel-all and cancel-all-after send none.
 - **Orders:** safety rests on `client_order_id`. `PlaceOrder` always sends a `client_order_id`
   (a UUID if you do not set one); it is unique per account and a repeat is refused before any funds
   move. After an ambiguous failure (connection error, timeout, 5xx) the SDK first looks the order up by

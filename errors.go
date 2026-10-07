@@ -13,7 +13,7 @@ import (
 )
 
 // Error categories. An *APIError matches at most one of them with errors.Is, except that
-// ErrJurisdictionBlocked also matches ErrForbidden. An error with a code this SDK does not
+// ErrJurisdictionBlocked also matches ErrForbidden and ErrDeadManNotArmed also matches ErrConflict. An error with a code this SDK does not
 // know matches none of them: check [APIError.Code] instead.
 var (
 	ErrValidation          = errors.New("cexy: validation failed")            // 400
@@ -22,6 +22,7 @@ var (
 	ErrJurisdictionBlocked = errors.New("cexy: blocked in this jurisdiction") // 451 JURISDICTION_BLOCKED
 	ErrNotFound            = errors.New("cexy: not found")                    // 404
 	ErrConflict            = errors.New("cexy: conflict")                     // 409
+	ErrDeadManNotArmed     = errors.New("cexy: dead-man switch not armed")    // 409 DEAD_MAN_NOT_ARMED
 	ErrUnprocessable       = errors.New("cexy: refused by a business rule")   // 422
 	ErrRateLimited         = errors.New("cexy: rate limited")                 // 429
 	ErrServer              = errors.New("cexy: server error")                 // 5xx
@@ -75,7 +76,8 @@ func (e *APIError) Is(target error) bool {
 	if target == e.kind {
 		return true
 	}
-	return e.kind == ErrJurisdictionBlocked && target == ErrForbidden
+	return (e.kind == ErrJurisdictionBlocked && target == ErrForbidden) ||
+		(e.kind == ErrDeadManNotArmed && target == ErrConflict)
 }
 
 // Known reports whether Code is listed in errors.yaml.
@@ -202,6 +204,8 @@ func errorFromResponse(status int, body []byte, h http.Header, redact func(strin
 		e.kind = ErrRateLimited
 	case e.Code == CodeJurisdictionBlocked:
 		e.kind = ErrJurisdictionBlocked
+	case e.Code == CodeDeadManNotArmed && status == 409:
+		e.kind = ErrDeadManNotArmed
 	case hasEnvelope && !knownErrorCodes[e.Code]:
 		e.kind = nil
 	case status >= 500:

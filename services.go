@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"strings"
 	"time"
 )
 
@@ -500,6 +501,62 @@ func (s *TradingService) CancelAll(ctx context.Context, symbol string, opts ...C
 // CancelAllMarkets cancels every open order in EVERY market, in one request. See CancelAll.
 func (s *TradingService) CancelAllMarkets(ctx context.Context, opts ...CallOption) (CancelAllResult, error) {
 	return s.cancelAllOnce(ctx, nil, opts)
+}
+
+// CancelAllAfter arms, re-arms or disarms the dead-man switch for one market, such as
+// "BTC/USDT": if it is not armed again within timeout, the server cancels every open order in
+// that market. A timeout of exactly 0 disarms the switch. An empty or blank symbol is a
+// ConfigError (the server would read it as "every market"); use CancelAllAfterMarkets for that.
+//
+// timeout must be a whole number of milliseconds: a negative one, a non-zero one below 1 ms and
+// a fractional one are a ConfigError, so a non-zero timeout never turns into 0 (which would
+// disarm). The SDK checks nothing else: the server owns the range (5000 to 600000 ms, else
+// ErrValidation).
+//
+// A market maker should arm about every 2 seconds with a 10 second timeout. Take the local
+// deadline from the moment the call started (not when it returned) and never compare the local
+// clock with the returned Deadline: use ServerTime to measure it. When the switch fires it is
+// cleared, so quoting again needs a new arm. The per-market switch and the all-markets switch
+// are separate and each fires on its own. A disarm (0) only switches off the scope it names.
+//
+// Repeating an arm is harmless, so it is retried after connection errors like CancelAll. An
+// arm still in flight can land after a later disarm and re-arm it: if the switch must be off,
+// disarm once more after any retried arm. No endpoint reads the switch.
+//
+// A house account that places an order without an armed switch gets DEAD_MAN_NOT_ARMED
+// (ErrDeadManNotArmed, also ErrConflict, never retryable) from PlaceOrder: stop quoting, arm,
+// and do not retry the placement blindly.
+func (s *TradingService) CancelAllAfter(ctx context.Context, symbol string, timeout time.Duration, opts ...CallOption) (CancelAllAfter, error) {
+	if strings.TrimSpace(symbol) == "" {
+		return CancelAllAfter{}, &ConfigError{Msg: `Trading.CancelAllAfter: symbol is required ("BASE/QUOTE"); use CancelAllAfterMarkets for every market`}
+	}
+	return s.cancelAllAfterOnce(ctx, &symbol, timeout, opts)
+}
+
+// CancelAllAfterMarkets is CancelAllAfter for the all-markets switch: it sends an explicit
+// "symbol": null. It is separate from the per-market switches. See CancelAllAfter.
+func (s *TradingService) CancelAllAfterMarkets(ctx context.Context, timeout time.Duration, opts ...CallOption) (CancelAllAfter, error) {
+	return s.cancelAllAfterOnce(ctx, nil, timeout, opts)
+}
+
+// cancelAllAfterBody always carries "symbol", as null for every market: the generated request
+// omits a nil symbol, and the server reads a missing one as every market too, but the SDK says so.
+type cancelAllAfterBody struct {
+	Symbol    *string `json:"symbol"`
+	TimeoutMs int64   `json:"timeout_ms"`
+}
+
+func (s *TradingService) cancelAllAfterOnce(ctx context.Context, symbol *string, timeout time.Duration, opts []CallOption) (CancelAllAfter, error) {
+	switch {
+	case timeout < 0:
+		return CancelAllAfter{}, &ConfigError{Msg: "Trading.CancelAllAfter: timeout is negative; use 0 to disarm"}
+	case timeout > 0 && timeout < time.Millisecond:
+		return CancelAllAfter{}, &ConfigError{Msg: "Trading.CancelAllAfter: timeout is below 1 ms; use 0 to disarm"}
+	case timeout%time.Millisecond != 0:
+		return CancelAllAfter{}, &ConfigError{Msg: "Trading.CancelAllAfter: timeout must be a whole number of milliseconds"}
+	}
+	return getData[CancelAllAfter](ctx, s.t, call{op: OpCancelAllAfter,
+		body: cancelAllAfterBody{Symbol: symbol, TimeoutMs: int64(timeout / time.Millisecond)}}, opts)
 }
 
 func (s *TradingService) cancelAllOnce(ctx context.Context, symbol *string, opts []CallOption) (CancelAllResult, error) {

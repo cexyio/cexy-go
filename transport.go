@@ -125,11 +125,11 @@ func (t *transport) options(opts []CallOption) callOptions {
 // request sends c with the standard retry policy: retryable errors and connection failures
 // are retried, except when the server asks to wait longer than MaxServerWait. Pool join and
 // exit carry an Idempotency-Key reused on every attempt, which the server honours; cancel-all
-// is naturally repeatable. Any other mutation is sent once. PlaceOrder and CancelOrder use
+// and cancel-all-after are naturally repeatable. Any other mutation is sent once. PlaceOrder and CancelOrder use
 // attempt with their own policies.
 func (t *transport) request(ctx context.Context, c call, opts []CallOption) (*rawResponse, error) {
 	o := t.options(opts)
-	if operations[c.op].Method != http.MethodGet && !c.idempotent && c.op != OpCancelAll {
+	if operations[c.op].Method != http.MethodGet && !c.idempotent && c.op != OpCancelAll && c.op != OpCancelAllAfter {
 		o.maxRetries = 0
 	}
 	if c.idempotent && c.idempotencyKey == "" {

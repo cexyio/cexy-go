@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `Trading.CancelAllAfter` and `Trading.CancelAllAfterMarkets`: arm, re-arm or disarm the dead-man switch
+  (`POST /trading/orders/cancel-all-after`), with the `CancelAllAfter` result type. Retried after connection
+  errors like cancel-all. Refuses a blank symbol, and a timeout that is negative, below 1 ms or fractional.
+- `ErrDeadManNotArmed` (`CodeDeadManNotArmed`, 409, never retried; also matches `ErrConflict`).
+
 ## [0.1.0-dev.11] (2026-10-07)
 
 ### Added
