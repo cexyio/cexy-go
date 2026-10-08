@@ -139,7 +139,7 @@ type Balance struct {
 
 // CancelAllAfterRequest: Arms, re-arms or disarms the dead-man switch.
 type CancelAllAfterRequest struct {
-	// One market's orders only. Omitted or `null`, the switch covers every market. A per-market switch and the all-markets switch are separate: each fires on its own.
+	// One market's orders only. Omitted or `null`, the switch covers every market; an empty string is refused (400). A per-market switch and the all-markets switch are separate: each fires on its own.
 	Symbol *string `json:"symbol,omitempty"`
 	// Milliseconds from now after which the open orders in scope are cancelled, unless the switch is armed again first: from 5000 to 600000. `0` disarms.
 	TimeoutMs int64 `json:"timeout_ms"`
@@ -151,7 +151,7 @@ type CancelAllAfter struct {
 	Armed bool `json:"armed"`
 	// When the orders are cancelled unless armed again. `null` when disarmed.
 	Deadline *time.Time `json:"deadline,omitempty"`
-	// The server's clock when the switch was set, to measure the deadline against.
+	// The server's time after the deadline was stored, to measure the deadline against.
 	ServerTime time.Time `json:"server_time"`
 	// The market it covers, or `null` for every market.
 	Symbol *string `json:"symbol,omitempty"`
