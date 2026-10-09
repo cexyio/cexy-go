@@ -6,10 +6,19 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-dev.13] (2026-10-09)
+
 ### Changed
 - Requires Go >= 1.26.9 (was 1.26.6), the standard-library security floor: GO-2026-6605, -6607, -6608, -6610,
   -6611, -6612, -6613 and -6617 (net/http, net/textproto, crypto/tls) are fixed in 1.26.9. Consumers on Go
   1.26.6 to 1.26.8 must upgrade.
+- README, rate limits: after a 429 with a wait hint the client holds every request, not only the
+  retried one. A key that keeps sending through its own limit counts against its IP's failed-key limit
+  (120 a minute); market makers should send their cancel/risk key from its own egress IP.
+- README, "Market buys by total": a market buy by `quote_quantity` spends at most the budget, taker fee
+  included (`filled_quote_quantity + fee_paid <= quote_quantity`); the precision rule
+  (`PRECISION_EXCEEDED`), how a budget order ends and how to read its progress.
+- Built against cexy-api-spec `b0451a0` (`place_order` description text only; no model change).
 
 ## [0.1.0-dev.12] (2026-10-07)
 
