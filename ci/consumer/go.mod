@@ -2,7 +2,7 @@
 // dependencies, none of its test-only code. See CexyQA's consumer-build rule (2026-09-28).
 module example.com/cexy-consumer-check
 
-go 1.26.6
+go 1.26.9
 
 require github.com/cexyio/cexy-go v0.0.0
 
