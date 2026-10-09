@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- Requires Go >= 1.26.9 (was 1.26.6), the standard-library security floor: GO-2026-6605, -6607, -6608, -6610,
+  -6611, -6612, -6613 and -6617 (net/http, net/textproto, crypto/tls) are fixed in 1.26.9. Consumers on Go
+  1.26.6 to 1.26.8 must upgrade.
+
 ## [0.1.0-dev.12] (2026-10-07)
 
 ### Added
