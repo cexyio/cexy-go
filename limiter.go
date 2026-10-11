@@ -23,6 +23,7 @@ type RateLimitState struct {
 type rateLimiter struct {
 	mu           sync.Mutex
 	rpm          float64
+	burst        float64 // most tokens held: rpm for the request limiter, one second's for the order budget
 	tokens       float64
 	last         time.Time
 	blockedUntil time.Time
@@ -31,7 +32,13 @@ type rateLimiter struct {
 }
 
 func newRateLimiter(rpm int, now func() time.Time, sleep func(context.Context, time.Duration) error) *rateLimiter {
-	return &rateLimiter{rpm: float64(rpm), tokens: float64(rpm), last: now(), now: now, sleep: sleep}
+	return &rateLimiter{rpm: float64(rpm), burst: float64(rpm), tokens: float64(rpm), last: now(), now: now, sleep: sleep}
+}
+
+// newOrderBudget is the optional order-actions budget: perSecond a second, at most one second's
+// worth at once.
+func newOrderBudget(perSecond float64, now func() time.Time, sleep func(context.Context, time.Duration) error) *rateLimiter {
+	return &rateLimiter{rpm: perSecond * 60, burst: perSecond, tokens: perSecond, last: now(), now: now, sleep: sleep}
 }
 
 func (l *rateLimiter) state() RateLimitState {
@@ -41,23 +48,25 @@ func (l *rateLimiter) state() RateLimitState {
 	return RateLimitState{RequestsPerMinute: l.rpm, Tokens: l.tokens, BlockedUntil: l.blockedUntil}
 }
 
-// acquire waits until a request may be sent, then takes a token.
-func (l *rateLimiter) acquire(ctx context.Context) error {
+// acquire waits until a request may be sent, then takes n tokens (a batch of N takes N). A cost
+// above the bucket's size waits for a full bucket and leaves it in debt.
+func (l *rateLimiter) acquire(ctx context.Context, n float64) error {
 	for {
 		l.mu.Lock()
 		l.refill()
 		now := l.now()
+		need := min(n, l.burst)
 		var wait time.Duration
 		switch {
 		case now.Before(l.blockedUntil):
 			wait = l.blockedUntil.Sub(now)
-		case l.tokens >= 1:
-			l.tokens--
+		case l.tokens >= need:
+			l.tokens -= n
 			l.mu.Unlock()
 			return nil
 		default:
 			perToken := time.Minute.Seconds() / l.rpm
-			wait = time.Duration(math.Ceil((1-l.tokens)*perToken*1000)) * time.Millisecond
+			wait = time.Duration(math.Ceil((need-l.tokens)*perToken*1000)) * time.Millisecond
 		}
 		l.mu.Unlock()
 		if err := l.sleep(ctx, wait); err != nil {
@@ -91,6 +100,7 @@ func (l *rateLimiter) update(h http.Header) {
 	// A limit below 1 a minute is not plausible; ignoring it keeps every token wait under a minute.
 	if limit, ok := headerNum(h, "X-RateLimit-Limit"); ok && limit >= 1 && limit < l.rpm {
 		l.rpm = limit
+		l.burst = math.Min(l.burst, limit)
 		l.tokens = math.Min(l.tokens, limit)
 	}
 	remaining, ok := headerNum(h, "X-RateLimit-Remaining")
@@ -129,7 +139,7 @@ func (l *rateLimiter) blockLocked(d time.Duration) {
 func (l *rateLimiter) refill() {
 	now := l.now()
 	if elapsed := now.Sub(l.last); elapsed > 0 {
-		l.tokens = math.Min(l.rpm, l.tokens+elapsed.Minutes()*l.rpm)
+		l.tokens = math.Min(l.burst, l.tokens+elapsed.Minutes()*l.rpm)
 		l.last = now
 	}
 }

@@ -29,6 +29,8 @@ type APIKey struct {
 	Label string `json:"label"`
 	// When it was last used, if ever.
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	// Its rate-limit tier: `default`, or `mm` for a market maker's key, which only the exchange sets.
+	RateTier string `json:"rate_tier"`
 	// Whether it has been revoked.
 	Revoked bool `json:"revoked"`
 	// Granted scopes.
@@ -137,6 +139,50 @@ type Balance struct {
 	Total    Amount `json:"total"`
 }
 
+// BatchOrderItem: One order of a batch: an order as for `POST /trading/orders`, without the symbol, and with `client_order_id` required.
+type BatchOrderItem struct {
+	// Your own identifier, unique per account. Required: a retry of the batch is answered `ALREADY_EXISTS` for every order it already placed, so nothing is placed twice.
+	ClientOrderID    string            `json:"client_order_id"`
+	Price            *Amount           `json:"price,omitempty"`
+	Quantity         *Amount           `json:"quantity,omitempty"`
+	QuoteQuantity    *Amount           `json:"quote_quantity,omitempty"`
+	Side             OrderSide         `json:"side"`
+	StopPrice        *Amount           `json:"stop_price,omitempty"`
+	TimeInForce      *TimeInForce      `json:"time_in_force,omitempty"`
+	TriggerDirection *TriggerDirection `json:"trigger_direction,omitempty"`
+	Type             OrderType         `json:"type"`
+}
+
+// BatchOrderRequest: Places up to 20 orders in one market (Phase 0 B2).
+type BatchOrderRequest struct {
+	// The orders, 1 to 20, placed one after another in this order.
+	Orders []BatchOrderItem `json:"orders"`
+	// The market every order is placed in.
+	Symbol string `json:"symbol"`
+}
+
+// BatchOrder: What a batch did: one result per order, in the order sent.
+type BatchOrder struct {
+	// How many were refused.
+	Failed int `json:"failed"`
+	// How many were accepted.
+	Placed int `json:"placed"`
+	// One per order sent, in the same order.
+	Results []BatchOrderResult `json:"results"`
+}
+
+// BatchOrderResult: One order's outcome in a batch: exactly one of `order` and `error` is set.
+type BatchOrderResult struct {
+	// Its `client_order_id`, as sent.
+	ClientOrderID string     `json:"client_order_id"`
+	Error         *ErrorBody `json:"error,omitempty"`
+	// Fills produced on entry, oldest first; empty when refused.
+	Fills []Fill `json:"fills"`
+	// Its position in the request, from 0.
+	Index int    `json:"index"`
+	Order *Order `json:"order,omitempty"`
+}
+
 // CancelAllAfterRequest: Arms, re-arms or disarms the dead-man switch.
 type CancelAllAfterRequest struct {
 	// One market's orders only. Omitted or `null`, the switch covers every market; an empty string is refused (400). A per-market switch and the all-markets switch are separate: each fires on its own.
@@ -179,6 +225,42 @@ type CancelAllResult struct {
 	Failures []CancelFailure `json:"failures"`
 	// More open orders exist than one call handles (500). Call again.
 	HasMore bool `json:"has_more"`
+}
+
+// CancelBatchItem: One order to cancel: exactly one of `order_id` and `client_order_id`.
+type CancelBatchItem struct {
+	// Your identifier for it.
+	ClientOrderID *string `json:"client_order_id,omitempty"`
+	// The order's id.
+	OrderID *string `json:"order_id,omitempty"`
+}
+
+// CancelBatchRequest: Cancels up to 50 orders, each named by its id or by your own (Phase 0 B2).
+type CancelBatchRequest struct {
+	// The orders, 1 to 50, cancelled one after another in this order.
+	Orders []CancelBatchItem `json:"orders"`
+}
+
+// CancelBatch: What a batch cancel did: one result per entry, in the order sent.
+type CancelBatch struct {
+	// How many were cancelled.
+	Cancelled int `json:"cancelled"`
+	// How many were not.
+	Failed int `json:"failed"`
+	// One per entry sent, in the same order.
+	Results []CancelBatchResult `json:"results"`
+}
+
+// CancelBatchResult: One entry's outcome in a batch cancel: exactly one of `order` and `error` is set.
+type CancelBatchResult struct {
+	// The client order id, as sent.
+	ClientOrderID *string    `json:"client_order_id,omitempty"`
+	Error         *ErrorBody `json:"error,omitempty"`
+	// Its position in the request, from 0.
+	Index int    `json:"index"`
+	Order *Order `json:"order,omitempty"`
+	// The order id, as sent.
+	OrderID *string `json:"order_id,omitempty"`
 }
 
 // CancelFailure: Why one order could not be cancelled.
@@ -306,6 +388,23 @@ const (
 	DepositStatusUnderReview  DepositStatus = "under_review"
 	DepositStatusInternal     DepositStatus = "internal"
 )
+
+// ErrorBody: The `error` object as it appears on the wire.
+type ErrorBody struct {
+	Code ErrorCode `json:"code"`
+	// Structured context, when available.
+	Details map[string]any `json:"details,omitempty"`
+	// Per-field validation messages, keyed by request field name.
+	//
+	// Present only on validation failures. Render each message beside its input.
+	Fields map[string]string `json:"fields,omitempty"`
+	// Human-readable description. May change between releases.
+	Message string `json:"message"`
+	// Correlates this response with server logs. Quote it in support requests.
+	RequestID *string `json:"request_id,omitempty"`
+	// Whether an identical retry could succeed.
+	Retryable bool `json:"retryable"`
+}
 
 // ExchangeConfig: Public exchange configuration.
 //

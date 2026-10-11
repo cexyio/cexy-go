@@ -29,6 +29,40 @@ var (
 	ErrUnexpectedRedirect  = errors.New("cexy: unexpected redirect")          // 3xx (never followed)
 )
 
+// ErrBadResponse matches an error for a 2xx answer the SDK could not use: not JSON, without
+// "data", undecodable, or (for a batch) results that do not match the request. The server
+// acted on such a request.
+var ErrBadResponse = errors.New("cexy: unusable response")
+
+// badResponseError is an ErrBadResponse with its own message.
+type badResponseError struct{ msg string }
+
+func (e *badResponseError) Error() string        { return e.msg }
+func (e *badResponseError) Is(target error) bool { return target == ErrBadResponse }
+
+// BatchPlaceError is returned by Trading.PlaceOrders when it fails after building its request
+// body. ClientOrderIDs are the ids of every order in the body, in request order, the generated
+// ones included: look them up with Trading.OrderByClientID before placing any of them again.
+// MaybePlaced is false only when every attempt was a definite refusal (429, 501, 503, another
+// 4xx, or a connection that was never made); then nothing was placed. Err is the cause:
+// errors.As and errors.Is see through to it (*APIError, *ConnectionError, context.Canceled,
+// ErrBadResponse).
+type BatchPlaceError struct {
+	ClientOrderIDs []string
+	MaybePlaced    bool
+	Err            error
+}
+
+func (e *BatchPlaceError) Error() string {
+	if e.MaybePlaced {
+		return fmt.Sprintf("cexy: PlaceOrders failed and some of its %d orders may have been placed: check their client_order_ids "+
+			"before placing them again: %v", len(e.ClientOrderIDs), e.Err)
+	}
+	return fmt.Sprintf("cexy: PlaceOrders failed and none of its %d orders was placed: %v", len(e.ClientOrderIDs), e.Err)
+}
+
+func (e *BatchPlaceError) Unwrap() error { return e.Err }
+
 // CodeUnexpectedRedirect is the code of the *APIError for a 3xx response. The SDK never follows
 // redirects, so that credentials and orders are never re-sent to another URL.
 const CodeUnexpectedRedirect ErrorCode = "UNEXPECTED_REDIRECT"
@@ -103,6 +137,8 @@ type ConnectionError struct {
 	// True when the per-attempt timeout expired.
 	Timeout bool
 	Err     error
+
+	notSent bool // the connection was never made (the batch calls read it)
 }
 
 func (e *ConnectionError) Error() string {

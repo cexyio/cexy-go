@@ -17,7 +17,9 @@ type OperationID string
 const (
 	OpCancelAll               OperationID = "cancel_all"
 	OpCancelAllAfter          OperationID = "cancel_all_after"
+	OpCancelBatch             OperationID = "cancel_batch"
 	OpCancelOrder             OperationID = "cancel_order"
+	OpCancelOrderByClientID   OperationID = "cancel_order_by_client_id"
 	OpCandles                 OperationID = "candles"
 	OpDepositAddress          OperationID = "deposit_address"
 	OpExchangeConfig          OperationID = "exchange_config"
@@ -61,6 +63,7 @@ const (
 	OpOpenOrders              OperationID = "open_orders"
 	OpOrderHistory            OperationID = "order_history"
 	OpOrderbook               OperationID = "orderbook"
+	OpPlaceBatch              OperationID = "place_batch"
 	OpPlaceOrder              OperationID = "place_order"
 	OpPositions               OperationID = "positions"
 	OpServerTime              OperationID = "server_time"
@@ -73,7 +76,9 @@ const (
 var operations = map[OperationID]OperationInfo{
 	OpCancelAll:               {Method: "POST", Path: "/api/v1/trading/orders/cancel-all", Auth: "api_key", Scope: "trade"},
 	OpCancelAllAfter:          {Method: "POST", Path: "/api/v1/trading/orders/cancel-all-after", Auth: "api_key", Scope: "trade"},
+	OpCancelBatch:             {Method: "POST", Path: "/api/v1/trading/orders/cancel-batch", Auth: "api_key", Scope: "trade"},
 	OpCancelOrder:             {Method: "DELETE", Path: "/api/v1/trading/orders/{order_id}", Auth: "api_key", Scope: "trade"},
+	OpCancelOrderByClientID:   {Method: "DELETE", Path: "/api/v1/trading/orders/by-client-id/{client_order_id}", Auth: "api_key", Scope: "trade"},
 	OpCandles:                 {Method: "GET", Path: "/api/v1/futures/markets/{coin}/candles", Auth: "none", Scope: ""},
 	OpDepositAddress:          {Method: "GET", Path: "/api/v1/wallet/deposit-address", Auth: "api_key", Scope: "read"},
 	OpExchangeConfig:          {Method: "GET", Path: "/api/v1/config", Auth: "none", Scope: ""},
@@ -117,6 +122,7 @@ var operations = map[OperationID]OperationInfo{
 	OpOpenOrders:              {Method: "GET", Path: "/api/v1/futures/orders", Auth: "api_key", Scope: "read"},
 	OpOrderHistory:            {Method: "GET", Path: "/api/v1/trading/orders/history", Auth: "api_key", Scope: "read"},
 	OpOrderbook:               {Method: "GET", Path: "/api/v1/futures/markets/{coin}/orderbook", Auth: "none", Scope: ""},
+	OpPlaceBatch:              {Method: "POST", Path: "/api/v1/trading/orders/batch", Auth: "api_key", Scope: "trade"},
 	OpPlaceOrder:              {Method: "POST", Path: "/api/v1/trading/orders", Auth: "api_key", Scope: "trade"},
 	OpPositions:               {Method: "GET", Path: "/api/v1/futures/positions", Auth: "api_key", Scope: "read"},
 	OpServerTime:              {Method: "GET", Path: "/api/v1/time", Auth: "none", Scope: ""},

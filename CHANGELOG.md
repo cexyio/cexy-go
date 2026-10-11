@@ -6,6 +6,36 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `Trading.PlaceOrders(ctx, symbol, orders)`: up to 20 orders in one market in one request
+  (`POST /trading/orders/batch`). Not atomic; results in request order, each `OutcomePlaced`,
+  `OutcomeFailed`, `OutcomeRecovered` or `OutcomeUnknown` (`BatchPlaceResult`, `BatchOrderOutcome`,
+  input `PlaceOrdersItem`). A `client_order_id` is generated for each order without one, before the
+  first attempt; a retry resends the same body. After a lost answer, an order the earlier attempt placed
+  is reported recovered from the server's `ALREADY_EXISTS` details (looked up once by client order id if
+  they are missing), never placed again.
+- `Trading.CancelOrders(ctx, entries)`: up to 50 cancels by `OrderID` or `ClientOrderID`
+  (`POST /trading/orders/cancel-batch`, `BatchCancelResult`, `CancelEntryOutcome`).
+- `Trading.CancelOrderByClientID(ctx, id)` (`DELETE /trading/orders/by-client-id/{id}`).
+- `Options.OrderActionsPerSecond`: an optional client-side budget for placements.
+- `BatchPlaceError`: every `PlaceOrders` failure after its body is built carries all the
+  `client_order_id`s sent (generated ones included) and `MaybePlaced`, and wraps the cause.
+  `NewClientOrderID()` exports the id generator; `ErrBadResponse` matches an unusable 2xx.
+- Batch results: an item error with `details.order_id` (such as `MARKET_UNAVAILABLE`) is reported
+  recovered on any attempt, and an item `INTERNAL` error is looked up once by client order id. A 2xx
+  without usable results (no data, undecodable, or not matching the request) is an error.
+- `.` and `..` client order ids are refused locally in batches.
+- A recovered order whose `details.status` is `unknown` is looked up; a recovery lookup that fails in
+  any way (an error, or a 200 that is not an order) makes the item unknown. `CancelOrders` checks that
+  each result echoes the id its entry was sent with.
+- `APIKey.RateTier` (`default` or `mm`), and the generated `ErrorBody` (a batch item's error).
+- Shared conformance cases: `trading/batch_orders.json`.
+
+### Changed
+- A batch takes one limiter token per order or entry.
+- A 429 with `details.limit` `order_actions` holds only placements for its wait, not the whole client.
+- The error for a 2xx answer that is not JSON now also matches `ErrBadResponse` (same message).
+
 ## [0.1.0-dev.13] (2026-10-09)
 
 ### Changed

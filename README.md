@@ -134,6 +134,61 @@ There are no withdrawal or transfer methods: API keys cannot withdraw or transfe
 released (the amount moves to `Available`) or cancelled by the exchange. It is never nil: an
 empty slice when none, including from servers that predate the field.
 
+### Batch orders
+
+Place up to 20 orders in one market with one request, or cancel up to 50:
+
+```go
+res, err := c.Trading.PlaceOrders(ctx, "BTC/USDT", []cexy.PlaceOrdersItem{
+	{Side: cexy.OrderSideBuy, Type: cexy.OrderTypeLimit, Price: cexy.Ptr(cexy.Amount("64000")), Quantity: cexy.Ptr(cexy.Amount("0.01"))},
+	{Side: cexy.OrderSideSell, Type: cexy.OrderTypeLimit, Price: cexy.Ptr(cexy.Amount("66000")), Quantity: cexy.Ptr(cexy.Amount("0.01"))},
+})
+if err != nil {
+	return err
+}
+for _, o := range res.Results { // request order
+	fmt.Println(o.Index, o.ClientOrderID, o.Outcome, o.OrderID, o.Status, o.Error)
+}
+
+_, err = c.Trading.CancelOrders(ctx, []cexy.CancelBatchItem{{OrderID: cexy.Ptr("...")}, {ClientOrderID: cexy.Ptr("...")}})
+_, err = c.Trading.CancelOrderByClientID(ctx, "my-id-1")
+```
+
+- Each order is placed (or cancelled) on its own: the batch is **not atomic**, and one refusal does
+  not stop the rest. Each result's `Outcome` is `OutcomePlaced` (or `OutcomeCancelled`),
+  `OutcomeFailed` with `Error`, `OutcomeRecovered` or `OutcomeUnknown` (below). The counts on the
+  result are computed from the results.
+- Every order carries a `client_order_id`; one (a UUID) is generated for each order without one.
+  Your own ids must be 1 to 64 characters of `A-Z a-z 0-9 _ - . :`, not `.` or `..`, distinct
+  within the batch, and unique per account across all markets.
+- **If you need to reconcile, supply and save your own `client_order_id`s before the call**
+  (`cexy.NewClientOrderID()` makes one). That is the only protection if your process dies
+  mid-call.
+- **Retries:** the request body is built once; a retry after a lost answer (a timeout, or any 5xx
+  except 501 and 503) resends it unchanged, and the server refuses every id it already placed, so
+  nothing is placed twice. Such an order comes back as
+  `OutcomeRecovered` with its `OrderID` and `Status`. A `rejected` status means the server refused it
+  for funds and its id is spent: do not place it again under that id. `OutcomeUnknown` means its
+  state could not be read; it was not placed again (look it up with `Trading.OrderByClientID`). A
+  cancel that a retry finds already closed is looked up and comes back as `OutcomeRecovered` with
+  its current status. An order refused with an order id in its details (`MARKET_UNAVAILABLE` when
+  the market stopped while matching) exists, so it is `OutcomeRecovered` too, and an item
+  `INTERNAL` error is looked up once.
+- A recovered order counts as placed unless its status is `rejected`, even one that ended
+  `cancelled` with nothing filled: read `Status` before acting on it.
+- **`res.Unknown > 0`:** some orders' state could not be read. Look each one up with
+  `Trading.OrderByClientID` before placing anything again.
+- **Errors:** once the body is built, every failure of `PlaceOrders` is a `*cexy.BatchPlaceError`
+  with `ClientOrderIDs` (every id sent, in order, generated ones included) and `MaybePlaced`. The
+  cause is wrapped: `errors.As` finds the `*APIError` or `*ConnectionError`, and `errors.Is` finds
+  `context.Canceled` or `cexy.ErrBadResponse` (a 2xx without usable results, which the server
+  acted on). Reconcile with `Trading.OrderByClientID` when `MaybePlaced` is true.
+- A 400 (bad request), 403 (account may not trade), 404 (no such market) or 429 (spent budget,
+  waited out and resent) refuses the attempt it answers, which placed nothing. An earlier attempt
+  of the same call whose answer was lost may still have placed orders: then `MaybePlaced` is true.
+  A batch larger than the key's whole budget is a 400 with a number in `Details["limit"]`: send
+  fewer at a time. The SDK never splits a batch.
+
 ### Market buys by total
 
 A market buy can name a budget, `quote_quantity`, instead of a `quantity`: "spend at most this
@@ -321,6 +376,13 @@ minute per key). Cancel-all is limited separately to 30 a minute per account. It
 `X-RateLimit-Limit` / `X-RateLimit-Remaining` / `X-RateLimit-Reset` (seconds until the window resets),
 and pauses after a 429. Change it with `Options.RequestsPerMinute`, or turn it off with
 `DisableRateLimit`. The limiter belongs to one `Client`, which is safe for concurrent use: share it.
+
+**Batches and order budgets.** A batch of N orders or cancel entries takes N tokens from the client's
+limiter, as the server counts it. A market maker's key also has an order budget of 50 placements a
+second (per key and per account); cancels never count against it. A 429 whose `Details["limit"]` is
+`"order_actions"` holds only **placements** (`PlaceOrder`, `PlaceOrders`) for its wait: reads and
+cancels keep going. Set `Options.OrderActionsPerSecond` to 50 to keep placements under that budget
+locally instead of being refused (off by default).
 
 ## WebSocket
 

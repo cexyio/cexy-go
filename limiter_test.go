@@ -31,7 +31,7 @@ func TestLimiterBucket(t *testing.T) {
 	l := newRateLimiter(60, clk.Now, clk.sleep)
 	start := clk.Now()
 	for i := 0; i < 61; i++ {
-		if err := l.acquire(context.Background()); err != nil {
+		if err := l.acquire(context.Background(), 1); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -50,7 +50,7 @@ func TestLimiterAdaptsToHeaders(t *testing.T) {
 		t.Fatalf("%+v", st)
 	}
 	start := clk.Now()
-	_ = l.acquire(context.Background())
+	_ = l.acquire(context.Background(), 1)
 	if clk.Now().Sub(start) < 7*time.Second {
 		t.Fatal("did not wait for the reset")
 	}

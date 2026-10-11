@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
+	"sync"
 	"time"
 )
 
@@ -68,7 +70,7 @@ type OperationInfo struct {
 	Scope        string // "", "read" or "trade"
 }
 
-// Operations returns the SDK surface: the 40 operations with their method, path, auth and
+// Operations returns the SDK surface: the 55 operations with their method, path, auth and
 // required key scope.
 func Operations() map[OperationID]OperationInfo {
 	out := make(map[OperationID]OperationInfo, len(operations))
@@ -88,7 +90,89 @@ type call struct {
 	// idempotent: the endpoint honours Idempotency-Key (pool join and exit), so one is sent and
 	// reused on every retry. No other call sends one.
 	idempotent bool
+	// cost: request tokens this call takes from the client limiter (0 means 1; a batch of N
+	// takes N).
+	cost int
+	// orderActions: placements in this call (PlaceOrder 1, PlaceOrders N, anything else 0). They
+	// wait out an order-actions hold and spend Options.OrderActionsPerSecond.
+	orderActions int
+	// attempts, when set, gets one entry per failed attempt of request: whether the server may
+	// have acted on it. The batch calls read it to tell a lost answer from a definite refusal.
+	attempts *[]attemptKind
+	// sent, when set, tells whether the latest attempt reached the HTTP client (anything that
+	// fails before it, such as a config or credential error, sent nothing).
+	sent *bool
 }
+
+// attemptKind is how one failed attempt of a mutation ended.
+type attemptKind string
+
+const (
+	// attemptAmbiguous: the server may have acted (a network error after sending, a cancelled
+	// or expired context, any 5xx except 501 and 503, or a 2xx the SDK cannot use).
+	attemptAmbiguous attemptKind = "ambiguous"
+	// attemptRefused: it did not (429, 501, 503, any other 4xx, or a request that was never sent).
+	attemptRefused attemptKind = "refused"
+)
+
+// classifyAttempt tells an ambiguous failure from a definite refusal. sent is false when the
+// attempt failed before reaching the HTTP client. An error it does not recognise is ambiguous:
+// a wrong "maybe placed" costs a lookup, a wrong "not placed" invites a duplicate order.
+func classifyAttempt(err error, sent bool) attemptKind {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return attemptAmbiguous // a cancelled or expired call may have been sent
+	}
+	if !sent {
+		return attemptRefused
+	}
+	var ce *ConnectionError
+	if errors.As(err, &ce) {
+		if ce.notSent {
+			return attemptRefused
+		}
+		return attemptAmbiguous
+	}
+	var ae *APIError
+	if errors.As(err, &ae) {
+		// Every 5xx except 501 and 503 (Cloudflare's 520 and 524 included). This changes only how
+		// an attempt is read, not which statuses are retried.
+		if ae.Status >= 500 && ae.Status != 501 && ae.Status != 503 {
+			return attemptAmbiguous
+		}
+		return attemptRefused
+	}
+	// An unusable 2xx was acted on; anything else unrecognised may have been.
+	return attemptAmbiguous
+}
+
+// afterAmbiguous reports whether an earlier attempt of the call may have been acted on.
+func afterAmbiguous(attempts []attemptKind) bool {
+	for _, a := range attempts {
+		if a == attemptAmbiguous {
+			return true
+		}
+	}
+	return false
+}
+
+// repeatSafeMutations are the mutations that request retries without an Idempotency-Key:
+// placements (a client_order_id makes the server refuse a repeat; PlaceOrders reads the
+// attempts), cancels (cancelling twice changes nothing more) and cancel-all-after (a repeated
+// arm leaves a deadline no earlier, a repeated disarm leaves it disarmed). PlaceOrder,
+// CancelOrder and CancelOrderByClientID run their own retry loops with the same rule.
+var repeatSafeMutations = map[OperationID]bool{
+	OpPlaceOrder:            true,
+	OpPlaceBatch:            true,
+	OpCancelOrder:           true,
+	OpCancelOrderByClientID: true,
+	OpCancelBatch:           true,
+	OpCancelAll:             true,
+	OpCancelAllAfter:        true,
+}
+
+// orderActionsLimit is details.limit on a 429 that refused order actions (a market maker's
+// per-second budget). It holds only placements, never reads or cancels.
+const orderActionsLimit = "order_actions"
 
 type rawResponse struct {
 	status int
@@ -109,6 +193,12 @@ type transport struct {
 	now        func() time.Time
 	random     func() float64
 	onRetry    func(RetryInfo)
+
+	// orderLimiter: the optional per-second budget for placements (Options.OrderActionsPerSecond).
+	orderLimiter *rateLimiter
+	// placementsHeldUntil: an order-actions 429 holds placements, and only them, until then.
+	holdMu              sync.Mutex
+	placementsHeldUntil time.Time
 }
 
 func (t *transport) options(opts []CallOption) callOptions {
@@ -124,12 +214,12 @@ func (t *transport) options(opts []CallOption) callOptions {
 
 // request sends c with the standard retry policy: retryable errors and connection failures
 // are retried, except when the server asks to wait longer than MaxServerWait. Pool join and
-// exit carry an Idempotency-Key reused on every attempt, which the server honours; cancel-all
-// and cancel-all-after are naturally repeatable. Any other mutation is sent once. PlaceOrder and CancelOrder use
-// attempt with their own policies.
+// exit carry an Idempotency-Key reused on every attempt, which the server honours; the
+// repeatSafeMutations are naturally repeatable. Any other mutation is sent once. PlaceOrder,
+// CancelOrder and CancelOrderByClientID use attempt with their own policies.
 func (t *transport) request(ctx context.Context, c call, opts []CallOption) (*rawResponse, error) {
 	o := t.options(opts)
-	if operations[c.op].Method != http.MethodGet && !c.idempotent && c.op != OpCancelAll && c.op != OpCancelAllAfter {
+	if operations[c.op].Method != http.MethodGet && !c.idempotent && !repeatSafeMutations[c.op] {
 		o.maxRetries = 0
 	}
 	if c.idempotent && c.idempotencyKey == "" {
@@ -138,10 +228,19 @@ func (t *transport) request(ctx context.Context, c call, opts []CallOption) (*ra
 			c.idempotencyKey = newID()
 		}
 	}
+	sent := new(bool)
+	if c.sent != nil {
+		sent = c.sent
+	}
+	c.sent = sent
 	for attempt := 0; ; attempt++ {
+		*sent = false
 		res, err := t.attempt(ctx, c, o)
 		if err == nil {
 			return res, nil
+		}
+		if c.attempts != nil {
+			*c.attempts = append(*c.attempts, classifyAttempt(err, *sent))
 		}
 		if attempt >= o.maxRetries || !isRetryable(err) || ctx.Err() != nil {
 			return nil, err
@@ -244,7 +343,12 @@ func (t *transport) attemptOnce(ctx context.Context, c call, o callOptions) (*ra
 			info.Method, info.Path)}
 	}
 	if t.limiter != nil {
-		if err := t.limiter.acquire(ctx); err != nil {
+		if err := t.limiter.acquire(ctx, float64(max(c.cost, 1))); err != nil {
+			return nil, err
+		}
+	}
+	if c.orderActions > 0 {
+		if err := t.acquirePlacements(ctx, c.orderActions); err != nil {
 			return nil, err
 		}
 	}
@@ -284,8 +388,12 @@ func (t *transport) attemptOnce(ctx context.Context, c call, o callOptions) (*ra
 		}
 	}
 
+	if c.sent != nil {
+		*c.sent = true
+	}
 	resp, err := t.http.Do(req)
 	var data []byte
+	notSent := err != nil && dialFailed(err)
 	if err == nil {
 		data, err = io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
 		resp.Body.Close()
@@ -296,7 +404,7 @@ func (t *transport) attemptOnce(ctx context.Context, c call, o callOptions) (*ra
 		}
 		timeout := errors.Is(actx.Err(), context.DeadlineExceeded)
 		return nil, &ConnectionError{Method: info.Method, Path: info.Path, Timeout: timeout,
-			Err: errors.New(t.redact(err.Error()))}
+			Err: errors.New(t.redact(err.Error())), notSent: notSent}
 	}
 
 	if t.limiter != nil {
@@ -309,14 +417,58 @@ func (t *transport) attemptOnce(ctx context.Context, c call, o callOptions) (*ra
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		apiErr := errorFromResponse(resp.StatusCode, data, resp.Header, t.redact)
 		if errors.Is(apiErr, ErrRateLimited) && apiErr.RetryAfter > 0 && t.limiter != nil {
-			t.limiter.blockFor(apiErr.RetryAfter)
+			if limit, _ := apiErr.Details["limit"].(string); limit == orderActionsLimit {
+				t.holdPlacements(apiErr.RetryAfter)
+			} else {
+				t.limiter.blockFor(apiErr.RetryAfter)
+			}
 		}
 		return nil, apiErr
 	}
 	if !c.text && len(data) > 0 && !json.Valid(data) {
-		return nil, fmt.Errorf("cexy: %s %s: expected JSON, got %q", info.Method, info.Path, resp.Header.Get("Content-Type"))
+		return nil, &badResponseError{msg: fmt.Sprintf("cexy: %s %s: expected JSON, got %q", info.Method, info.Path,
+			resp.Header.Get("Content-Type"))}
 	}
 	return &rawResponse{status: resp.StatusCode, header: resp.Header, body: data}, nil
+}
+
+// holdPlacements holds placements, and only them, for d (an order-actions 429), at most
+// MaxServerWait. A later hold is never shortened.
+func (t *transport) holdPlacements(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	d = min(d, MaxServerWait) // server hints are untrusted
+	t.holdMu.Lock()
+	defer t.holdMu.Unlock()
+	if until := t.now().Add(d); until.After(t.placementsHeldUntil) {
+		t.placementsHeldUntil = until
+	}
+}
+
+// acquirePlacements waits out an order-actions hold, then takes n from the optional order budget.
+func (t *transport) acquirePlacements(ctx context.Context, n int) error {
+	for {
+		t.holdMu.Lock()
+		wait := t.placementsHeldUntil.Sub(t.now())
+		t.holdMu.Unlock()
+		if wait <= 0 {
+			break
+		}
+		if err := t.sleep(ctx, wait); err != nil {
+			return err
+		}
+	}
+	if t.orderLimiter != nil {
+		return t.orderLimiter.acquire(ctx, float64(n))
+	}
+	return nil
+}
+
+// dialFailed: the connection was never made, so the request was not sent.
+func dialFailed(err error) bool {
+	var oe *net.OpError
+	return errors.As(err, &oe) && oe.Op == "dial"
 }
 
 var pathParamRE = regexp.MustCompile(`\{(\w+)\}`)
