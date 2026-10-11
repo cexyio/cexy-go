@@ -25,6 +25,9 @@ All notable changes to this project are documented here. The format follows
   recovered on any attempt, and an item `INTERNAL` error is looked up once by client order id. A 2xx
   without usable results (no data, undecodable, or not matching the request) is an error.
 - `.` and `..` client order ids are refused locally in batches.
+- A recovered order whose `details.status` is `unknown` is looked up; a recovery lookup that fails in
+  any way (an error, or a 200 that is not an order) makes the item unknown. `CancelOrders` checks that
+  each result echoes the id its entry was sent with.
 - `APIKey.RateTier` (`default` or `mm`), and the generated `ErrorBody` (a batch item's error).
 - Shared conformance cases: `trading/batch_orders.json`.
 

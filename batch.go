@@ -185,8 +185,8 @@ func (s *TradingService) PlaceOrders(ctx context.Context, symbol string, orders 
 // It is retried like CancelOrder: after a lost answer, an entry refused with INVALID_STATE (an
 // earlier attempt may have cancelled it) is looked up once and comes back OutcomeRecovered
 // with its current Status, or OutcomeUnknown if the lookup fails. Results are in request order.
-// A 2xx answer that is not usable (no data, undecodable, or results that do not match the
-// entries) is an error matching ErrBadResponse.
+// A 2xx answer that is not usable (no data, undecodable, or results whose count, index, order
+// id or client order id do not match the entries) is an error matching ErrBadResponse.
 func (s *TradingService) CancelOrders(ctx context.Context, entries []CancelBatchItem, opts ...CallOption) (BatchCancelResult, error) {
 	items, err := checkCancelOrders(entries)
 	if err != nil {
@@ -248,29 +248,32 @@ func matchPlaceResults(items []BatchOrderItem, results []BatchOrderResult) error
 	return nil
 }
 
-// matchCancelResults: one result per entry sent, at its index.
+// matchCancelResults: one result per entry sent, at its index, echoing the id the entry was
+// sent with (an absent echo is tolerated; the other id may name the order found).
 func matchCancelResults(items []CancelBatchItem, results []CancelBatchResult) error {
 	if len(results) != len(items) {
 		return &badResponseError{msg: fmt.Sprintf("cexy: %s: %d results for %d entries", OpCancelBatch, len(results), len(items))}
 	}
+	same := func(echo, sent *string) bool { return sent == nil || echo == nil || *echo == *sent }
 	for i, r := range results {
-		if r.Index != i {
-			return &badResponseError{msg: fmt.Sprintf("cexy: %s: result %d is for index %d", OpCancelBatch, i, r.Index)}
+		if r.Index != i || !same(r.OrderID, items[i].OrderID) || !same(r.ClientOrderID, items[i].ClientOrderID) {
+			return &badResponseError{msg: fmt.Sprintf("cexy: %s: result %d (index %d, order_id %q, client_order_id %q) does not "+
+				"match the entry sent", OpCancelBatch, i, r.Index, deref(r.OrderID), deref(r.ClientOrderID))}
 		}
 	}
 	return nil
 }
 
 // recoverPlaced reads an order the server could not describe, once and without retries. It is
-// never placed again. A lookup that fails for any reason, a done ctx included (then nothing is
-// sent), makes it OutcomeUnknown: the batch has answered, so the other results still count.
+// never placed again. A lookup that fails for any reason (an error, a done ctx, in which case
+// nothing is sent, or an answer that is not an order) makes it OutcomeUnknown: the batch has answered, so the other results still count.
 func (s *TradingService) recoverPlaced(ctx context.Context, out BatchOrderOutcome, o callOptions) BatchOrderOutcome {
 	var ord Order
 	err := ctx.Err()
 	if err == nil {
 		ord, err = s.OrderByClientID(ctx, out.ClientOrderID, WithTimeout(o.timeout), WithMaxRetries(0))
 	}
-	if err != nil {
+	if err != nil || !isOrder(ord) {
 		return BatchOrderOutcome{Index: out.Index, ClientOrderID: out.ClientOrderID, Outcome: OutcomeUnknown,
 			Fills: []Fill{}, Error: out.Error}
 	}
@@ -291,13 +294,16 @@ func (s *TradingService) recoverCancelled(ctx context.Context, out CancelEntryOu
 	default:
 		ord, err = s.OrderByClientID(ctx, out.ClientOrderID, WithTimeout(o.timeout), WithMaxRetries(0))
 	}
-	if err != nil {
+	if err != nil || !isOrder(ord) {
 		out.Outcome = OutcomeUnknown
 		return out
 	}
 	out.OrderID, out.Status, out.Order = ord.ID, ord.Status, &ord
 	return out
 }
+
+// isOrder: a lookup answer that names an order (rule 12: anything else is a failed lookup).
+func isOrder(o Order) bool { return o.ID != "" && o.Status != "" }
 
 func checkClientOrderID(cid, where string) error {
 	if !clientOrderIDRE.MatchString(cid) || cid == "." || cid == ".." {
@@ -378,6 +384,15 @@ func detail(e *ErrorBody, name string) string {
 	return v
 }
 
+// detailStatus is details.status, or "" when it is missing or "unknown" (rule 11: then the
+// order is looked up).
+func detailStatus(e *ErrorBody) OrderStatus {
+	if st := detail(e, "status"); st != "unknown" {
+		return OrderStatus(st)
+	}
+	return ""
+}
+
 // placeOutcome reads one result. A recovered result still needing a lookup has an empty
 // OrderID or Status. Rules 3 and 3b of the conformance file.
 func placeOutcome(r BatchOrderResult, afterAmbiguous bool) BatchOrderOutcome {
@@ -390,12 +405,12 @@ func placeOutcome(r BatchOrderResult, afterAmbiguous bool) BatchOrderOutcome {
 	case r.Error == nil && r.Order != nil:
 		out.Outcome, out.OrderID, out.Status, out.Order = OutcomePlaced, r.Order.ID, r.Order.Status, r.Order
 	case r.Error != nil && afterAmbiguous && r.Error.Code == CodeAlreadyExists:
-		out.Outcome, out.OrderID, out.Status = OutcomeRecovered, detail(r.Error, "order_id"), OrderStatus(detail(r.Error, "status"))
+		out.Outcome, out.OrderID, out.Status = OutcomeRecovered, detail(r.Error, "order_id"), detailStatus(r.Error)
 		out.Fills = []Fill{}
 	case r.Error != nil && r.Error.Code != CodeAlreadyExists && detail(r.Error, "order_id") != "":
 		// The order exists (MARKET_UNAVAILABLE when the market stopped while matching, for
 		// example), on any attempt.
-		out.Outcome, out.OrderID, out.Status = OutcomeRecovered, detail(r.Error, "order_id"), OrderStatus(detail(r.Error, "status"))
+		out.Outcome, out.OrderID, out.Status = OutcomeRecovered, detail(r.Error, "order_id"), detailStatus(r.Error)
 	case r.Error != nil && r.Error.Code == CodeInternal:
 		// It may follow a committed order: looked up by client_order_id.
 		out.Outcome = OutcomeRecovered

@@ -174,6 +174,8 @@ _, err = c.Trading.CancelOrderByClientID(ctx, "my-id-1")
   its current status. An order refused with an order id in its details (`MARKET_UNAVAILABLE` when
   the market stopped while matching) exists, so it is `OutcomeRecovered` too, and an item
   `INTERNAL` error is looked up once.
+- A recovered order counts as placed unless its status is `rejected`, even one that ended
+  `cancelled` with nothing filled: read `Status` before acting on it.
 - **`res.Unknown > 0`:** some orders' state could not be read. Look each one up with
   `Trading.OrderByClientID` before placing anything again.
 - **Errors:** once the body is built, every failure of `PlaceOrders` is a `*cexy.BatchPlaceError`

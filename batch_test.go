@@ -365,6 +365,10 @@ func checkBatchCommon(t *testing.T, cs batchCase, api *fakeBatchAPI, c *Client, 
 				t.Errorf("details.limit %v, want %v", err, exp.ErrorDetailsLimit)
 			}
 		}
+	case exp.Error == "bad_response":
+		if !errors.Is(err, ErrBadResponse) {
+			t.Errorf("err %v, want ErrBadResponse", err)
+		}
 	case exp.Error == "connection":
 		var ce *ConnectionError
 		if !errors.As(err, &ce) {
@@ -491,6 +495,9 @@ func TestBatchCancelConformance(t *testing.T) {
 			res, err := c.Trading.CancelOrders(context.Background(), cancelItems(t, cs.Request.Orders))
 			checkBatchCommon(t, cs, api, c, err)
 			exp := cs.Expect
+			if exp.Results == nil {
+				return
+			}
 			got := make([]map[string]any, 0, len(res.Results))
 			for _, o := range res.Results {
 				got = append(got, outcomeRow(o.Index, o.Outcome, o.OrderID, o.Status, o.Error))
@@ -944,11 +951,18 @@ func TestCancelOrdersMismatchIsBadResponse(t *testing.T) {
 	swapped := map[string]any{"cancelled": 2, "failed": 0, "results": []any{
 		map[string]any{"index": 1, "order_id": "o1", "order": map[string]any{"id": "o1", "status": "cancelled"}, "error": nil},
 		map[string]any{"index": 0, "order_id": "o0", "order": map[string]any{"id": "o0", "status": "cancelled"}, "error": nil}}}
-	for name, data := range map[string]map[string]any{"count": short, "index": swapped} {
+	cidEcho := map[string]any{"cancelled": 2, "failed": 0, "results": []any{
+		map[string]any{"index": 0, "order_id": "o0", "order": map[string]any{"id": "o0", "status": "cancelled"}, "error": nil},
+		map[string]any{"index": 1, "client_order_id": "zz", "order": map[string]any{"id": "o1", "status": "cancelled"}, "error": nil}}}
+	for name, data := range map[string]map[string]any{"count": short, "index": swapped, "client_order_id": cidEcho} {
 		api := &fakeBatchAPI{t: t, tmpl: map[string]any{"symbol": "BTC/USDT"}, method: http.MethodPost, path: cancelPath,
 			lookups: map[string]batchExchange{}, attempts: []batchExchange{{HTTPStatus: 200, Data: data}}}
 		c, _ := newBatchClient(t, api, Options{})
-		_, err := c.Trading.CancelOrders(context.Background(), expandCancel(2))
+		entries := expandCancel(2)
+		if name == "client_order_id" {
+			entries[1] = CancelBatchItem{ClientOrderID: Ptr("c1")}
+		}
+		_, err := c.Trading.CancelOrders(context.Background(), entries)
 		if !errors.Is(err, ErrBadResponse) || len(api.bodies) != 1 {
 			t.Errorf("%s: err %v, calls %d", name, err, len(api.bodies))
 		}
@@ -1004,5 +1018,35 @@ func TestBatchUnrecognisedErrorMaybePlaced(t *testing.T) {
 	_, err = c2.Trading.PlaceOrders(context.Background(), "BTC/USDT", expandPlace(1))
 	if !errors.As(err, &be) || be.MaybePlaced || rt2.calls != 0 || !errors.As(err, new(oddError)) {
 		t.Fatalf("credential error: %v (%+v), calls %d", err, be, rt2.calls)
+	}
+}
+
+// An absent id echo is tolerated, and the other id may name the order found (rule 13).
+func TestCancelOrdersToleratesAbsentEcho(t *testing.T) {
+	data := map[string]any{"cancelled": 2, "failed": 0, "results": []any{
+		map[string]any{"index": 0, "order": map[string]any{"id": "o0", "status": "cancelled"}, "error": nil},
+		map[string]any{"index": 1, "client_order_id": "c1", "order_id": "o7", "order": map[string]any{"id": "o7", "status": "cancelled"}, "error": nil}}}
+	api := &fakeBatchAPI{t: t, tmpl: map[string]any{"symbol": "BTC/USDT"}, method: http.MethodPost, path: cancelPath,
+		lookups: map[string]batchExchange{}, attempts: []batchExchange{{HTTPStatus: 200, Data: data}}}
+	c, _ := newBatchClient(t, api, Options{})
+	res, err := c.Trading.CancelOrders(context.Background(), []CancelBatchItem{{OrderID: Ptr("o0")}, {ClientOrderID: Ptr("c1")}})
+	if err != nil || res.Cancelled != 2 {
+		t.Fatalf("%+v %v", res, err)
+	}
+}
+
+// A lookup answering 200 with something that is not an order makes the item unknown (rule 12).
+func TestRecoveryLookupNotAnOrderIsUnknown(t *testing.T) {
+	internal := map[string]any{"index": 0, "client_order_id": "c0", "order": nil, "fills": []any{},
+		"error": map[string]any{"code": "INTERNAL", "message": "internal", "retryable": false}}
+	for name, body := range map[string]string{"empty": `{}`, "number": `{"data": 5}`, "no id": `{"data": {"status": "open"}}`} {
+		api := &fakeBatchAPI{t: t, method: http.MethodPost, path: batchPath,
+			lookups:  map[string]batchExchange{"cid:c0": {HTTPStatus: 200, Body: json.RawMessage(body)}},
+			attempts: []batchExchange{{HTTPStatus: 200, Data: map[string]any{"placed": 0, "failed": 1, "results": []any{internal}}}}}
+		c, _ := newBatchClient(t, api, Options{})
+		res, err := c.Trading.PlaceOrders(context.Background(), "BTC/USDT", expandPlace(1))
+		if err != nil || res.Results[0].Outcome != OutcomeUnknown || res.Unknown != 1 || len(api.seen) != 1 {
+			t.Errorf("%s: %+v %v", name, res, err)
+		}
 	}
 }
