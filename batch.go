@@ -2,6 +2,7 @@ package cexy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 )
@@ -104,22 +105,36 @@ type BatchCancelResult struct {
 	Unknown   int
 }
 
+// NewClientOrderID returns a new client order id (a random UUID), as PlaceOrder and PlaceOrders
+// generate for an order without one. Create and save ids with it before a call when you must
+// be able to reconcile after any failure.
+func NewClientOrderID() string { return newID() }
+
 // PlaceOrders places 1 to 20 REAL orders in one market (needs the trade scope), each on its own
 // and in order: the batch is not atomic, and one refusal does not stop the rest. Amounts are
 // decimal strings.
 //
 // A ClientOrderID (a UUID) is generated for each order without one (nil); your own ids must
-// be 1 to 64 characters of A-Z a-z 0-9 _ - . : and distinct within the batch (a *ConfigError
-// before anything is sent). The ids sent are in the results.
+// be 1 to 64 characters of A-Z a-z 0-9 _ - . :, not "." or "..", and distinct within the batch
+// (a *ConfigError before anything is sent). The ids sent are in the results. To reconcile
+// after any failure, even a process crash, create and save your own ids first
+// (NewClientOrderID).
 //
 // Retry safety: the body, ids included, is built once and every retry resends it unchanged.
 // The server refuses an id it already placed, so nothing is placed twice: after a lost answer
-// (a connection error after sending, or 500, 502 or 504) such an order comes back
+// (a connection error after sending, or any 5xx except 501 and 503) such an order comes back
 // OutcomeRecovered with its OrderID and Status, read from the refusal's details or, when they
-// are missing, looked up once by client_order_id (OutcomeUnknown if that fails). A refusal of
-// the whole batch (400, 403, 404) is returned and never retried; a batch larger than the key's
-// whole budget (400 with a number in Details["limit"]) must be split by the caller. A 429 is
-// waited out and the same body resent. Results are in request order.
+// are missing, looked up once by client_order_id (OutcomeUnknown if that fails). An item
+// refused with an order id in its details (MARKET_UNAVAILABLE when the market stopped while
+// matching, for example) exists, so it comes back OutcomeRecovered too; an item INTERNAL error
+// is looked up once. Results are in request order. Res.Unknown > 0 means some orders' state
+// could not be read: look them up with Trading.OrderByClientID before placing anything again.
+//
+// Errors: once the body is built, every failure is a *BatchPlaceError with all the ids sent
+// and MaybePlaced (false only if no attempt can have been acted on). A refusal of the whole
+// batch (400, 403, 404) is not retried; it placed nothing in that attempt, but an earlier
+// ambiguous attempt may have. A batch larger than the key's whole budget (400 with a number in
+// Details["limit"]) must be split by the caller. A 429 is waited out and the same body resent.
 func (s *TradingService) PlaceOrders(ctx context.Context, symbol string, orders []PlaceOrdersItem, opts ...CallOption) (BatchPlaceResult, error) {
 	items, err := checkPlaceOrders(symbol, orders)
 	if err != nil {
@@ -128,9 +143,24 @@ func (s *TradingService) PlaceOrders(ctx context.Context, symbol string, orders 
 	var attempts []attemptKind
 	c := call{op: OpPlaceBatch, body: BatchOrderRequest{Symbol: symbol, Orders: items}, cost: len(items),
 		orderActions: len(items), attempts: &attempts}
-	data, err := getData[BatchOrder](ctx, s.t, c, opts)
+	fail := func(err error) (BatchPlaceResult, error) {
+		cids := make([]string, len(items))
+		for i, it := range items {
+			cids[i] = it.ClientOrderID
+		}
+		maybe := afterAmbiguous(attempts) || classifyAttempt(err) == attemptAmbiguous
+		return BatchPlaceResult{}, &BatchPlaceError{ClientOrderIDs: cids, MaybePlaced: maybe, Err: err}
+	}
+	raw, err := s.t.request(ctx, c, opts)
 	if err != nil {
-		return BatchPlaceResult{}, err
+		return fail(err)
+	}
+	data, err := decodeBatch[BatchOrder](OpPlaceBatch, raw)
+	if err == nil {
+		err = matchPlaceResults(items, data.Results)
+	}
+	if err != nil {
+		return fail(err)
 	}
 	ambiguous := afterAmbiguous(attempts)
 	o := s.t.options(opts)
@@ -151,6 +181,8 @@ func (s *TradingService) PlaceOrders(ctx context.Context, symbol string, orders 
 // It is retried like CancelOrder: after a lost answer, an entry refused with INVALID_STATE (an
 // earlier attempt may have cancelled it) is looked up once and comes back OutcomeRecovered
 // with its current Status, or OutcomeUnknown if the lookup fails. Results are in request order.
+// A 2xx answer that is not usable (no data, undecodable, or results that do not match the
+// entries) is an error matching ErrBadResponse.
 func (s *TradingService) CancelOrders(ctx context.Context, entries []CancelBatchItem, opts ...CallOption) (BatchCancelResult, error) {
 	items, err := checkCancelOrders(entries)
 	if err != nil {
@@ -158,7 +190,14 @@ func (s *TradingService) CancelOrders(ctx context.Context, entries []CancelBatch
 	}
 	var attempts []attemptKind
 	c := call{op: OpCancelBatch, body: CancelBatchRequest{Orders: items}, cost: len(items), attempts: &attempts}
-	data, err := getData[CancelBatch](ctx, s.t, c, opts)
+	raw, err := s.t.request(ctx, c, opts)
+	if err != nil {
+		return BatchCancelResult{}, err
+	}
+	data, err := decodeBatch[CancelBatch](OpCancelBatch, raw)
+	if err == nil {
+		err = matchCancelResults(items, data.Results)
+	}
 	if err != nil {
 		return BatchCancelResult{}, err
 	}
@@ -173,6 +212,49 @@ func (s *TradingService) CancelOrders(ctx context.Context, entries []CancelBatch
 		results = append(results, out)
 	}
 	return cancelResult(results), nil
+}
+
+// decodeBatch decodes the {"data": T} envelope of a batch answer; a missing or undecodable
+// "data" is ErrBadResponse.
+func decodeBatch[T any](op OperationID, raw *rawResponse) (T, error) {
+	var env struct {
+		Data *T `json:"data"`
+	}
+	var zero T
+	if err := json.Unmarshal(raw.body, &env); err != nil {
+		return zero, &badResponseError{msg: fmt.Sprintf("cexy: %s: cannot decode the response: %v", op, err)}
+	}
+	if env.Data == nil {
+		return zero, &badResponseError{msg: fmt.Sprintf("cexy: %s: the response has no data", op)}
+	}
+	return *env.Data, nil
+}
+
+// matchPlaceResults: one result per order sent, at its index, with its client_order_id.
+func matchPlaceResults(items []BatchOrderItem, results []BatchOrderResult) error {
+	if len(results) != len(items) {
+		return &badResponseError{msg: fmt.Sprintf("cexy: %s: %d results for %d orders", OpPlaceBatch, len(results), len(items))}
+	}
+	for i, r := range results {
+		if r.Index != i || r.ClientOrderID != items[i].ClientOrderID {
+			return &badResponseError{msg: fmt.Sprintf("cexy: %s: result %d is for index %d, client_order_id %q, not %q",
+				OpPlaceBatch, i, r.Index, r.ClientOrderID, items[i].ClientOrderID)}
+		}
+	}
+	return nil
+}
+
+// matchCancelResults: one result per entry sent, at its index.
+func matchCancelResults(items []CancelBatchItem, results []CancelBatchResult) error {
+	if len(results) != len(items) {
+		return &badResponseError{msg: fmt.Sprintf("cexy: %s: %d results for %d entries", OpCancelBatch, len(results), len(items))}
+	}
+	for i, r := range results {
+		if r.Index != i {
+			return &badResponseError{msg: fmt.Sprintf("cexy: %s: result %d is for index %d", OpCancelBatch, i, r.Index)}
+		}
+	}
+	return nil
 }
 
 // recoverPlaced reads an order the server could not describe, once and without retries. It is
@@ -214,8 +296,8 @@ func (s *TradingService) recoverCancelled(ctx context.Context, out CancelEntryOu
 }
 
 func checkClientOrderID(cid, where string) error {
-	if !clientOrderIDRE.MatchString(cid) {
-		return &ConfigError{Msg: fmt.Sprintf("%s: client_order_id must be 1 to 64 characters of A-Z a-z 0-9 _ - . :", where)}
+	if !clientOrderIDRE.MatchString(cid) || cid == "." || cid == ".." {
+		return &ConfigError{Msg: fmt.Sprintf(`%s: client_order_id must be 1 to 64 characters of A-Z a-z 0-9 _ - . :, not "." or ".."`, where)}
 	}
 	return nil
 }
@@ -267,6 +349,9 @@ func checkCancelOrders(entries []CancelBatchItem) ([]CancelBatchItem, error) {
 		if (oid == "") == (cid == "") {
 			return nil, &ConfigError{Msg: fmt.Sprintf("Trading.CancelOrders: orders[%d]: give exactly one of OrderID and ClientOrderID", i)}
 		}
+		if cid == "." || cid == ".." {
+			return nil, &ConfigError{Msg: fmt.Sprintf(`Trading.CancelOrders: orders[%d]: client_order_id must not be "." or ".."`, i)}
+		}
 		if oid != "" {
 			items[i] = CancelBatchItem{OrderID: &oid}
 		} else {
@@ -290,7 +375,7 @@ func detail(e *ErrorBody, name string) string {
 }
 
 // placeOutcome reads one result. A recovered result still needing a lookup has an empty
-// OrderID or Status.
+// OrderID or Status. Rules 3 and 3b of the conformance file.
 func placeOutcome(r BatchOrderResult, afterAmbiguous bool) BatchOrderOutcome {
 	fills := r.Fills
 	if fills == nil {
@@ -303,6 +388,13 @@ func placeOutcome(r BatchOrderResult, afterAmbiguous bool) BatchOrderOutcome {
 	case r.Error != nil && afterAmbiguous && r.Error.Code == CodeAlreadyExists:
 		out.Outcome, out.OrderID, out.Status = OutcomeRecovered, detail(r.Error, "order_id"), OrderStatus(detail(r.Error, "status"))
 		out.Fills = []Fill{}
+	case r.Error != nil && r.Error.Code != CodeAlreadyExists && detail(r.Error, "order_id") != "":
+		// The order exists (MARKET_UNAVAILABLE when the market stopped while matching, for
+		// example), on any attempt.
+		out.Outcome, out.OrderID, out.Status = OutcomeRecovered, detail(r.Error, "order_id"), OrderStatus(detail(r.Error, "status"))
+	case r.Error != nil && r.Error.Code == CodeInternal:
+		// It may follow a committed order: looked up by client_order_id.
+		out.Outcome = OutcomeRecovered
 	default:
 		out.Outcome = OutcomeFailed
 	}

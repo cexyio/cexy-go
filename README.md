@@ -159,17 +159,31 @@ _, err = c.Trading.CancelOrderByClientID(ctx, "my-id-1")
   `OutcomeFailed` with `Error`, `OutcomeRecovered` or `OutcomeUnknown` (below). The counts on the
   result are computed from the results.
 - Every order carries a `client_order_id`; one (a UUID) is generated for each order without one.
-  Your own ids must be 1 to 64 characters of `A-Z a-z 0-9 _ - . :`, distinct within the batch, and
-  unique per account across all markets.
-- **Retries:** the request body is built once; a retry after a timeout resends it unchanged, and the
-  server refuses every id it already placed, so nothing is placed twice. Such an order comes back as
+  Your own ids must be 1 to 64 characters of `A-Z a-z 0-9 _ - . :`, not `.` or `..`, distinct
+  within the batch, and unique per account across all markets.
+- **If you need to reconcile, supply and save your own `client_order_id`s before the call**
+  (`cexy.NewClientOrderID()` makes one). That is the only protection if your process dies
+  mid-call.
+- **Retries:** the request body is built once; a retry after a lost answer (a timeout, or any 5xx
+  except 501 and 503) resends it unchanged, and the server refuses every id it already placed, so
+  nothing is placed twice. Such an order comes back as
   `OutcomeRecovered` with its `OrderID` and `Status`. A `rejected` status means the server refused it
   for funds and its id is spent: do not place it again under that id. `OutcomeUnknown` means its
   state could not be read; it was not placed again (look it up with `Trading.OrderByClientID`). A
   cancel that a retry finds already closed is looked up and comes back as `OutcomeRecovered` with
-  its current status.
-- A whole batch is refused, with nothing placed, for a bad request (400), a market that does not
-  exist (404), an account that may not trade (403) or a spent budget (429, waited out and resent).
+  its current status. An order refused with an order id in its details (`MARKET_UNAVAILABLE` when
+  the market stopped while matching) exists, so it is `OutcomeRecovered` too, and an item
+  `INTERNAL` error is looked up once.
+- **`res.Unknown > 0`:** some orders' state could not be read. Look each one up with
+  `Trading.OrderByClientID` before placing anything again.
+- **Errors:** once the body is built, every failure of `PlaceOrders` is a `*cexy.BatchPlaceError`
+  with `ClientOrderIDs` (every id sent, in order, generated ones included) and `MaybePlaced`. The
+  cause is wrapped: `errors.As` finds the `*APIError` or `*ConnectionError`, and `errors.Is` finds
+  `context.Canceled` or `cexy.ErrBadResponse` (a 2xx without usable results, which the server
+  acted on). Reconcile with `Trading.OrderByClientID` when `MaybePlaced` is true.
+- A 400 (bad request), 403 (account may not trade), 404 (no such market) or 429 (spent budget,
+  waited out and resent) refuses the attempt it answers, which placed nothing. An earlier attempt
+  of the same call whose answer was lost may still have placed orders: then `MaybePlaced` is true.
   A batch larger than the key's whole budget is a 400 with a number in `Details["limit"]`: send
   fewer at a time. The SDK never splits a batch.
 

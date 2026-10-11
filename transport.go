@@ -105,10 +105,10 @@ type call struct {
 type attemptKind string
 
 const (
-	// attemptAmbiguous: the server may have acted (a network error after sending, or HTTP 500,
-	// 502 or 504).
+	// attemptAmbiguous: the server may have acted (a network error after sending, a cancelled
+	// or expired context, any 5xx except 501 and 503, or a 2xx the SDK cannot use).
 	attemptAmbiguous attemptKind = "ambiguous"
-	// attemptRefused: it did not (429, 503, any other 4xx, or a request that was never sent).
+	// attemptRefused: it did not (429, 501, 503, any other 4xx, or a request that was never sent).
 	attemptRefused attemptKind = "refused"
 )
 
@@ -122,7 +122,16 @@ func classifyAttempt(err error) attemptKind {
 		return attemptAmbiguous
 	}
 	var ae *APIError
-	if errors.As(err, &ae) && (ae.Status == 500 || ae.Status == 502 || ae.Status == 504) {
+	if errors.As(err, &ae) {
+		// Every 5xx except 501 and 503 (Cloudflare's 520 and 524 included). This changes only how
+		// an attempt is read, not which statuses are retried.
+		if ae.Status >= 500 && ae.Status != 501 && ae.Status != 503 {
+			return attemptAmbiguous
+		}
+		return attemptRefused
+	}
+	// A cancelled or expired call may have been sent; an unusable 2xx was acted on.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrBadResponse) {
 		return attemptAmbiguous
 	}
 	return attemptRefused
@@ -400,7 +409,8 @@ func (t *transport) attemptOnce(ctx context.Context, c call, o callOptions) (*ra
 		return nil, apiErr
 	}
 	if !c.text && len(data) > 0 && !json.Valid(data) {
-		return nil, fmt.Errorf("cexy: %s %s: expected JSON, got %q", info.Method, info.Path, resp.Header.Get("Content-Type"))
+		return nil, &badResponseError{msg: fmt.Sprintf("cexy: %s %s: expected JSON, got %q", info.Method, info.Path,
+			resp.Header.Get("Content-Type"))}
 	}
 	return &rawResponse{status: resp.StatusCode, header: resp.Header, body: data}, nil
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -29,6 +30,8 @@ type batchExchange struct {
 	Error        map[string]any    `json:"error"`
 	Headers      map[string]string `json:"headers"`
 	EchoCids     bool              `json:"echo_cids"`
+	Text         *string           `json:"text"` // a body that is not JSON, sent as is
+	Body         json.RawMessage   `json:"body"` // a JSON body exactly as given, not wrapped
 }
 
 type batchCase struct {
@@ -51,6 +54,9 @@ type batchCase struct {
 		Failed              *int             `json:"failed"`
 		Unknown             *int             `json:"unknown"`
 		Error               string           `json:"error"`
+		Cause               string           `json:"cause"`
+		MaybePlaced         *bool            `json:"maybe_placed"`
+		ErrorCids           string           `json:"error_cids"`
 		ErrorCode           string           `json:"error_code"`
 		ErrorDetailsLimit   any              `json:"error_details_limit"`
 		GeneratedCidIndexes []int            `json:"generated_cid_indexes"`
@@ -129,6 +135,7 @@ type fakeBatchAPI struct {
 	paths   []string
 	seen    []string // lookup keys, in order
 	reqs    []string // "METHOD path" of every request
+	all     [][]byte // the body of every request
 	unknown []string
 }
 
@@ -137,11 +144,13 @@ func (f *fakeBatchAPI) RoundTrip(req *http.Request) (*http.Response, error) {
 	if req.Body != nil {
 		body, _ = io.ReadAll(req.Body)
 		req.Body.Close()
+		req.Body = io.NopCloser(bytes.NewReader(body)) // for fallback
 	}
 	path := req.URL.EscapedPath()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reqs = append(f.reqs, req.Method+" "+path)
+	f.all = append(f.all, body)
 	switch {
 	case req.Method == f.method && path == f.path && f.attempts != nil:
 		n := len(f.bodies)
@@ -193,8 +202,20 @@ func (f *fakeBatchAPI) lookup(req *http.Request, key string) (*http.Response, er
 }
 
 func (f *fakeBatchAPI) reply(req *http.Request, item batchExchange, isLookup bool, sent []string) (*http.Response, error) {
+	if item.NetworkError == "dial" { // never connected: nothing was sent
+		return nil, &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	}
 	if item.NetworkError != "" {
 		return nil, errors.New("lost response: " + item.NetworkError)
+	}
+	if item.Text != nil || item.Body != nil {
+		b := []byte(item.Body)
+		ct := "application/json"
+		if item.Text != nil {
+			b, ct = []byte(*item.Text), "text/html"
+		}
+		return &http.Response{StatusCode: item.HTTPStatus, Header: http.Header{"Content-Type": {ct}},
+			Body: io.NopCloser(bytes.NewReader(b)), Request: req}, nil
 	}
 	if item.HTTPStatus == 200 {
 		if isLookup {
@@ -326,6 +347,24 @@ func checkBatchCommon(t *testing.T, cs batchCase, api *fakeBatchAPI, c *Client, 
 		}
 	}
 	switch {
+	case exp.Error == "batch":
+		var be *BatchPlaceError
+		if !errors.As(err, &be) {
+			t.Fatalf("err %v, want a *BatchPlaceError", err)
+		}
+		if exp.MaybePlaced == nil || be.MaybePlaced != *exp.MaybePlaced {
+			t.Errorf("MaybePlaced %v, want %v", be.MaybePlaced, exp.MaybePlaced)
+		}
+		if exp.ErrorCids == "sent" && !reflect.DeepEqual(be.ClientOrderIDs, sentCids(t, api.bodies[0])) {
+			t.Errorf("error cids %v, sent %v", be.ClientOrderIDs, sentCids(t, api.bodies[0]))
+		}
+		checkCause(t, err, exp.Cause)
+		if exp.ErrorDetailsLimit != nil {
+			var ae *APIError
+			if !errors.As(err, &ae) || fmt.Sprint(ae.Details["limit"]) != fmt.Sprint(exp.ErrorDetailsLimit) {
+				t.Errorf("details.limit %v, want %v", err, exp.ErrorDetailsLimit)
+			}
+		}
 	case exp.Error == "connection":
 		var ce *ConnectionError
 		if !errors.As(err, &ce) {
@@ -344,6 +383,44 @@ func checkBatchCommon(t *testing.T, cs batchCase, api *fakeBatchAPI, c *Client, 
 			t.Fatalf("err %v", err)
 		}
 	}
+}
+
+// checkCause maps a conformance `cause` onto Go: "connection" is a *ConnectionError,
+// "bad_response" matches ErrBadResponse, anything else is the *APIError code (Go names an
+// answer without an error envelope HTTP_<status>, as the conformance file does).
+func checkCause(t *testing.T, err error, cause string) {
+	t.Helper()
+	var ce *ConnectionError
+	var ae *APIError
+	switch {
+	case cause == "connection":
+		if !errors.As(err, &ce) {
+			t.Errorf("cause of %v, want a *ConnectionError", err)
+		}
+	case cause == "bad_response":
+		if !errors.Is(err, ErrBadResponse) {
+			t.Errorf("cause of %v, want ErrBadResponse", err)
+		}
+	case !errors.As(err, &ae) || string(ae.Code) != cause:
+		t.Errorf("cause of %v, want %s", err, cause)
+	}
+}
+
+func sentCids(t *testing.T, body []byte) []string {
+	t.Helper()
+	var b struct {
+		Orders []struct {
+			ClientOrderID string `json:"client_order_id"`
+		} `json:"orders"`
+	}
+	if err := json.Unmarshal(body, &b); err != nil {
+		t.Fatal(err)
+	}
+	out := make([]string, len(b.Orders))
+	for i, o := range b.Orders {
+		out[i] = o.ClientOrderID
+	}
+	return out
 }
 
 func outcomeRow(index int, outcome BatchOutcome, orderID string, status OrderStatus, e *ErrorBody) map[string]any {
@@ -367,6 +444,19 @@ func TestBatchPlaceConformance(t *testing.T) {
 			res, err := c.Trading.PlaceOrders(context.Background(), cs.Request.Symbol, placeItems(t, cs.Request.Orders))
 			checkBatchCommon(t, cs, api, c, err)
 			exp := cs.Expect
+			for _, i := range exp.GeneratedCidIndexes {
+				sent := sentCids(t, api.bodies[0])[i]
+				var got string
+				var be *BatchPlaceError
+				if errors.As(err, &be) {
+					got = be.ClientOrderIDs[i]
+				} else {
+					got = res.Results[i].ClientOrderID
+				}
+				if !clientOrderIDRE.MatchString(sent) || got != sent {
+					t.Errorf("generated cid %q, reported %q", sent, got)
+				}
+			}
 			if exp.Results == nil {
 				return
 			}
@@ -379,18 +469,6 @@ func TestBatchPlaceConformance(t *testing.T) {
 			}
 			if res.Placed != *exp.Placed || res.Failed != *exp.Failed || res.Unknown != *exp.Unknown {
 				t.Errorf("counts %d/%d/%d, want %d/%d/%d", res.Placed, res.Failed, res.Unknown, *exp.Placed, *exp.Failed, *exp.Unknown)
-			}
-			for _, i := range exp.GeneratedCidIndexes {
-				var b struct {
-					Orders []struct {
-						ClientOrderID string `json:"client_order_id"`
-					} `json:"orders"`
-				}
-				_ = json.Unmarshal(api.bodies[0], &b)
-				sent := b.Orders[i].ClientOrderID
-				if !clientOrderIDRE.MatchString(sent) || res.Results[i].ClientOrderID != sent {
-					t.Errorf("generated cid %q, result %q", sent, res.Results[i].ClientOrderID)
-				}
 			}
 		})
 	}
@@ -473,12 +551,30 @@ func expandCancel(n int) []CancelBatchItem {
 	return out
 }
 
+// emptyBatches answers every batch item with success, echoing what was sent, and other calls
+// with an order.
 func emptyBatches(req *http.Request) (int, any) {
+	var sent struct {
+		Orders []map[string]any `json:"orders"`
+	}
+	if req.Body != nil {
+		b, _ := io.ReadAll(req.Body)
+		_ = json.Unmarshal(b, &sent)
+	}
+	results := make([]any, len(sent.Orders))
 	switch req.URL.Path {
 	case batchPath:
-		return 200, dataEnv(map[string]any{"placed": 0, "failed": 0, "results": []any{}})
+		for i, o := range sent.Orders {
+			results[i] = map[string]any{"index": i, "client_order_id": o["client_order_id"], "fills": []any{},
+				"order": overlay(testOrder, map[string]any{"id": fmt.Sprintf("o%d", i)}), "error": nil}
+		}
+		return 200, dataEnv(map[string]any{"placed": len(results), "failed": 0, "results": results})
 	case cancelPath:
-		return 200, dataEnv(map[string]any{"cancelled": 0, "failed": 0, "results": []any{}})
+		for i, o := range sent.Orders {
+			results[i] = map[string]any{"index": i, "order_id": o["order_id"], "client_order_id": o["client_order_id"],
+				"order": overlay(testOrder, map[string]any{"status": "cancelled"}), "error": nil}
+		}
+		return 200, dataEnv(map[string]any{"cancelled": len(results), "failed": 0, "results": results})
 	case "/api/v1/trading/orders":
 		return 200, placeResponse()
 	case "/api/v1/trading/orders/cancel-all":
@@ -683,8 +779,7 @@ func TestBatchEveryAttemptHasAFreshNonce(t *testing.T) {
 }
 
 func TestPlaceOrdersWireBodyAndCallerSliceUntouched(t *testing.T) {
-	ok := batchExchange{HTTPStatus: 200, Data: map[string]any{"placed": 0, "failed": 0, "results": []any{}}}
-	api := &fakeBatchAPI{t: t, method: http.MethodPost, path: batchPath, attempts: []batchExchange{ok}}
+	api := &fakeBatchAPI{t: t, fallback: emptyBatches}
 	c, _ := newBatchClient(t, api, Options{})
 	orders := []PlaceOrdersItem{
 		{Side: OrderSideSell, Type: OrderTypeLimit, Price: Ptr(Amount("100.50")), Quantity: Ptr(Amount("2")),
@@ -698,8 +793,8 @@ func TestPlaceOrdersWireBodyAndCallerSliceUntouched(t *testing.T) {
 		t.Fatal("the caller's slice was modified")
 	}
 	var sent map[string]any
-	if len(api.bodies) != 1 || json.Unmarshal(api.bodies[0], &sent) != nil {
-		t.Fatalf("bodies %q", api.bodies)
+	if len(api.all) != 1 || json.Unmarshal(api.all[0], &sent) != nil {
+		t.Fatalf("bodies %q", api.all)
 	}
 	gen := sent["orders"].([]any)[1].(map[string]any)["client_order_id"].(string)
 	want := map[string]any{"symbol": "BTC/USDT", "orders": []any{
@@ -707,7 +802,7 @@ func TestPlaceOrdersWireBodyAndCallerSliceUntouched(t *testing.T) {
 		map[string]any{"side": "buy", "type": "market", "quantity": "1", "client_order_id": gen},
 	}}
 	if !reflect.DeepEqual(sent, want) || !clientOrderIDRE.MatchString(gen) {
-		t.Fatalf("sent %s", api.bodies[0])
+		t.Fatalf("sent %s", api.all[0])
 	}
 }
 
@@ -739,10 +834,10 @@ func TestBatchLookupAfterContextDoneIsUnknown(t *testing.T) {
 		return map[string]any{"index": 0, "client_order_id": cid, "order": nil, "fills": []any{},
 			"error": map[string]any{"code": "ALREADY_EXISTS", "message": "exists", "retryable": false, "details": details}}
 	}
-	r0 := exists("c1", map[string]any{"client_order_id": "c1"})
-	r1 := exists("c2", map[string]any{"client_order_id": "c2", "order_id": "o2", "status": "open"})
+	r0 := exists("c0", map[string]any{"client_order_id": "c0"})
+	r1 := exists("c1", map[string]any{"client_order_id": "c1", "order_id": "o2", "status": "open"})
 	r1["index"] = 1
-	r2 := map[string]any{"index": 2, "client_order_id": "c3", "order": map[string]any{"id": "o3", "status": "open"},
+	r2 := map[string]any{"index": 2, "client_order_id": "c2", "order": map[string]any{"id": "o3", "status": "open"},
 		"fills": []any{}, "error": nil}
 	api := &fakeBatchAPI{t: t, tmpl: map[string]any{"symbol": "BTC/USDT", "side": "buy", "type": "limit"},
 		method: http.MethodPost, path: batchPath, lookups: map[string]batchExchange{},
@@ -787,5 +882,75 @@ func TestBatchLookupAfterContextDoneIsUnknown(t *testing.T) {
 	if cres.Results[0].Outcome != OutcomeUnknown || cres.Results[1].Outcome != OutcomeCancelled || len(api2.seen) != 0 ||
 		cres.Cancelled != 1 || cres.Unknown != 1 || cres.Failed != 0 {
 		t.Fatalf("cancel result %+v lookups %v", cres, api2.seen)
+	}
+}
+
+// Go counts a connection that was never made as a definite refusal (L-1): the error says
+// nothing was placed, and a later ALREADY_EXISTS stays the caller's own.
+func TestBatchNotSentIsARefusal(t *testing.T) {
+	dial := batchExchange{NetworkError: "dial"}
+	api := &fakeBatchAPI{t: t, method: http.MethodPost, path: batchPath, lookups: map[string]batchExchange{},
+		attempts: []batchExchange{dial, dial, dial, dial}}
+	c, _ := newBatchClient(t, api, Options{})
+	_, err := c.Trading.PlaceOrders(context.Background(), "BTC/USDT", expandPlace(2))
+	var be *BatchPlaceError
+	var ce *ConnectionError
+	if !errors.As(err, &be) || be.MaybePlaced || !errors.As(err, &ce) || len(api.bodies) != 4 ||
+		!reflect.DeepEqual(be.ClientOrderIDs, []string{"c0", "c1"}) {
+		t.Fatalf("err %v (%+v), attempts %d", err, be, len(api.bodies))
+	}
+
+	exists := map[string]any{"index": 0, "client_order_id": "c0", "order": nil, "fills": []any{},
+		"error": map[string]any{"code": "ALREADY_EXISTS", "message": "exists", "retryable": false,
+			"details": map[string]any{"client_order_id": "c0", "order_id": "o_old", "status": "filled"}}}
+	api2 := &fakeBatchAPI{t: t, method: http.MethodPost, path: batchPath, lookups: map[string]batchExchange{},
+		attempts: []batchExchange{dial, {HTTPStatus: 200, Data: map[string]any{"placed": 0, "failed": 1, "results": []any{exists}}}}}
+	c2, _ := newBatchClient(t, api2, Options{})
+	res, err := c2.Trading.PlaceOrders(context.Background(), "BTC/USDT", expandPlace(1))
+	if err != nil || res.Results[0].Outcome != OutcomeFailed || res.Failed != 1 {
+		t.Fatalf("%+v %v", res, err)
+	}
+}
+
+// A context cancelled while the batch is in flight: the error carries the ids, says the orders
+// may have been placed, and still matches context.Canceled.
+func TestBatchCancelledContextCarriesIDs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	api := &fakeBatchAPI{t: t, method: http.MethodPost, path: batchPath, lookups: map[string]batchExchange{},
+		attempts: []batchExchange{{NetworkError: "timeout"}}, answered: func(int) { cancel() }}
+	c, _ := newBatchClient(t, api, Options{})
+	orders := expandPlace(2)
+	orders[0].ClientOrderID = nil
+	_, err := c.Trading.PlaceOrders(ctx, "BTC/USDT", orders)
+	var be *BatchPlaceError
+	if !errors.As(err, &be) || !be.MaybePlaced || !errors.Is(err, context.Canceled) ||
+		!reflect.DeepEqual(be.ClientOrderIDs, sentCids(t, api.bodies[0])) || be.ClientOrderIDs[1] != "c1" {
+		t.Fatalf("err %v (%+v)", err, be)
+	}
+}
+
+func TestNewClientOrderID(t *testing.T) {
+	a, b := NewClientOrderID(), NewClientOrderID()
+	if a == b || !clientOrderIDRE.MatchString(a) || checkClientOrderID(a, "x") != nil {
+		t.Fatalf("%q %q", a, b)
+	}
+}
+
+// A cancel-batch 200 whose results do not match the entries sent is ErrBadResponse.
+func TestCancelOrdersMismatchIsBadResponse(t *testing.T) {
+	short := map[string]any{"cancelled": 1, "failed": 0, "results": []any{map[string]any{"index": 0, "order_id": "o0",
+		"client_order_id": nil, "order": map[string]any{"id": "o0", "status": "cancelled"}, "error": nil}}}
+	swapped := map[string]any{"cancelled": 2, "failed": 0, "results": []any{
+		map[string]any{"index": 1, "order_id": "o1", "order": map[string]any{"id": "o1", "status": "cancelled"}, "error": nil},
+		map[string]any{"index": 0, "order_id": "o0", "order": map[string]any{"id": "o0", "status": "cancelled"}, "error": nil}}}
+	for name, data := range map[string]map[string]any{"count": short, "index": swapped} {
+		api := &fakeBatchAPI{t: t, tmpl: map[string]any{"symbol": "BTC/USDT"}, method: http.MethodPost, path: cancelPath,
+			lookups: map[string]batchExchange{}, attempts: []batchExchange{{HTTPStatus: 200, Data: data}}}
+		c, _ := newBatchClient(t, api, Options{})
+		_, err := c.Trading.CancelOrders(context.Background(), expandCancel(2))
+		if !errors.Is(err, ErrBadResponse) || len(api.bodies) != 1 {
+			t.Errorf("%s: err %v, calls %d", name, err, len(api.bodies))
+		}
 	}
 }

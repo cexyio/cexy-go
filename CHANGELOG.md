@@ -18,12 +18,20 @@ All notable changes to this project are documented here. The format follows
   (`POST /trading/orders/cancel-batch`, `BatchCancelResult`, `CancelEntryOutcome`).
 - `Trading.CancelOrderByClientID(ctx, id)` (`DELETE /trading/orders/by-client-id/{id}`).
 - `Options.OrderActionsPerSecond`: an optional client-side budget for placements.
+- `BatchPlaceError`: every `PlaceOrders` failure after its body is built carries all the
+  `client_order_id`s sent (generated ones included) and `MaybePlaced`, and wraps the cause.
+  `NewClientOrderID()` exports the id generator; `ErrBadResponse` matches an unusable 2xx.
+- Batch results: an item error with `details.order_id` (such as `MARKET_UNAVAILABLE`) is reported
+  recovered on any attempt, and an item `INTERNAL` error is looked up once by client order id. A 2xx
+  without usable results (no data, undecodable, or not matching the request) is an error.
+- `.` and `..` client order ids are refused locally in batches.
 - `APIKey.RateTier` (`default` or `mm`), and the generated `ErrorBody` (a batch item's error).
 - Shared conformance cases: `trading/batch_orders.json`.
 
 ### Changed
 - A batch takes one limiter token per order or entry.
 - A 429 with `details.limit` `order_actions` holds only placements for its wait, not the whole client.
+- The error for a 2xx answer that is not JSON now also matches `ErrBadResponse` (same message).
 
 ## [0.1.0-dev.13] (2026-10-09)
 
