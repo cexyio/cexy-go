@@ -3,6 +3,7 @@ package cexy
 import (
 	"context"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -52,8 +53,13 @@ type Options struct {
 	// credentials and DefaultRPMWithKey with them. It adapts downwards to the server's
 	// X-RateLimit-* headers.
 	RequestsPerMinute int
-	// Disables the client-side rate limiter.
+	// Disables the client-side rate limiter, and with it the hold that a 429 sets.
 	DisableRateLimit bool
+	// A client-side budget for placements, in order actions a second: PlaceOrder takes 1 and
+	// PlaceOrders takes one per order; cancels never take any. 0 (the default) turns it off.
+	// A market maker's key has 50 a second on the server: set 50 to wait locally instead of
+	// being refused.
+	OrderActionsPerSecond float64
 	// Appended to the User-Agent: "my-bot/1.2" gives "cexy-go/<Version> my-bot/1.2".
 	UserAgentSuffix string
 	// Called before each retry (for logging or metrics). Never receives credentials.
@@ -184,6 +190,13 @@ func New(opts Options) (*Client, error) {
 		}
 		limiter = newRateLimiter(rpm, now, sleep)
 	}
+	var orderLimiter *rateLimiter
+	if ops := opts.OrderActionsPerSecond; ops != 0 {
+		if !(ops > 0) || math.IsInf(ops, 0) {
+			return nil, &ConfigError{Msg: "OrderActionsPerSecond must be a positive number (0 turns it off)"}
+		}
+		orderLimiter = newOrderBudget(ops, now, sleep)
+	}
 	ua := UserAgent
 	if s := strings.TrimSpace(opts.UserAgentSuffix); s != "" {
 		if strings.ContainsAny(s, "\r\n") {
@@ -192,7 +205,8 @@ func New(opts Options) (*Client, error) {
 		ua += " " + s
 	}
 
-	t := &transport{baseURL: base, origin: origin(u), http: hc, auth: auth, limiter: limiter, userAgent: ua, timeout: timeout,
+	t := &transport{baseURL: base, origin: origin(u), http: hc, auth: auth, limiter: limiter, orderLimiter: orderLimiter,
+		userAgent: ua, timeout: timeout,
 		maxRetries: maxRetries, sleep: sleep, now: now, random: random, onRetry: opts.OnRetry}
 	return &Client{
 		Markets:       &MarketsService{t},

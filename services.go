@@ -398,7 +398,7 @@ func (s *TradingService) PlaceOrder(ctx context.Context, order PlaceOrderRequest
 	}
 	order.ClientOrderID = &clientOrderID
 	o := s.t.options(opts)
-	c := call{op: OpPlaceOrder, body: order}
+	c := call{op: OpPlaceOrder, body: order, orderActions: 1}
 
 	for attempt := 0; ; attempt++ {
 		raw, err := s.t.attempt(ctx, c, o)
@@ -472,6 +472,34 @@ func (s *TradingService) CancelOrder(ctx context.Context, orderID string, opts .
 			return Order{}, err
 		}
 		if berr := s.t.backoff(ctx, OpCancelOrder, attempt, err, ""); berr != nil {
+			return Order{}, berr
+		}
+	}
+}
+
+// CancelOrderByClientID cancels one order named by your client_order_id (needs the trade
+// scope). It is retried like CancelOrder: if a RETRY gets INVALID_STATE, the order is fetched by
+// client_order_id and returned (check its Status). The id is sent percent-encoded as one path
+// segment.
+func (s *TradingService) CancelOrderByClientID(ctx context.Context, clientOrderID string, opts ...CallOption) (Order, error) {
+	o := s.t.options(opts)
+	c := call{op: OpCancelOrderByClientID, pathParams: map[string]string{"client_order_id": clientOrderID}}
+	for attempt := 0; ; attempt++ {
+		raw, err := s.t.attempt(ctx, c, o)
+		if err == nil {
+			return decodeData[Order](OpCancelOrderByClientID, raw)
+		}
+		if ctx.Err() != nil {
+			return Order{}, err
+		}
+		var ae *APIError
+		if attempt > 0 && errors.As(err, &ae) && ae.Code == CodeInvalidState {
+			return s.OrderByClientID(ctx, clientOrderID, WithTimeout(o.timeout))
+		}
+		if !isRetryable(err) || attempt >= o.maxRetries {
+			return Order{}, err
+		}
+		if berr := s.t.backoff(ctx, OpCancelOrderByClientID, attempt, err, ""); berr != nil {
 			return Order{}, berr
 		}
 	}

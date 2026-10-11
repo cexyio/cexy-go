@@ -103,6 +103,8 @@ type ConnectionError struct {
 	// True when the per-attempt timeout expired.
 	Timeout bool
 	Err     error
+
+	notSent bool // the connection was never made (the batch calls read it)
 }
 
 func (e *ConnectionError) Error() string {

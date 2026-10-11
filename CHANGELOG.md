@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `Trading.PlaceOrders(ctx, symbol, orders)`: up to 20 orders in one market in one request
+  (`POST /trading/orders/batch`). Not atomic; results in request order, each `OutcomePlaced`,
+  `OutcomeFailed`, `OutcomeRecovered` or `OutcomeUnknown` (`BatchPlaceResult`, `BatchOrderOutcome`,
+  input `PlaceOrdersItem`). A `client_order_id` is generated for each order without one, before the
+  first attempt; a retry resends the same body. After a lost answer, an order the earlier attempt placed
+  is reported recovered from the server's `ALREADY_EXISTS` details (looked up once by client order id if
+  they are missing), never placed again.
+- `Trading.CancelOrders(ctx, entries)`: up to 50 cancels by `OrderID` or `ClientOrderID`
+  (`POST /trading/orders/cancel-batch`, `BatchCancelResult`, `CancelEntryOutcome`).
+- `Trading.CancelOrderByClientID(ctx, id)` (`DELETE /trading/orders/by-client-id/{id}`).
+- `Options.OrderActionsPerSecond`: an optional client-side budget for placements.
+- `APIKey.RateTier` (`default` or `mm`), and the generated `ErrorBody` (a batch item's error).
+- Shared conformance cases: `trading/batch_orders.json`.
+
+### Changed
+- A batch takes one limiter token per order or entry.
+- A 429 with `details.limit` `order_actions` holds only placements for its wait, not the whole client.
+
 ## [0.1.0-dev.13] (2026-10-09)
 
 ### Changed
