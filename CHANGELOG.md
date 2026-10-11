@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-dev.14] (2026-10-11)
+
 ### Added
 - `Trading.PlaceOrders(ctx, symbol, orders)`: up to 20 orders in one market in one request
   (`POST /trading/orders/batch`). Not atomic; results in request order, each `OutcomePlaced`,
@@ -35,6 +37,7 @@ All notable changes to this project are documented here. The format follows
 - A batch takes one limiter token per order or entry.
 - A 429 with `details.limit` `order_actions` holds only placements for its wait, not the whole client.
 - The error for a 2xx answer that is not JSON now also matches `ErrBadResponse` (same message).
+- Built against cexy-api-spec `944581d` (batch orders, `client_order_id` pattern).
 
 ## [0.1.0-dev.13] (2026-10-09)
 
