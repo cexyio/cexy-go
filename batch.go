@@ -141,14 +141,18 @@ func (s *TradingService) PlaceOrders(ctx context.Context, symbol string, orders 
 		return BatchPlaceResult{}, err
 	}
 	var attempts []attemptKind
+	var sent bool
 	c := call{op: OpPlaceBatch, body: BatchOrderRequest{Symbol: symbol, Orders: items}, cost: len(items),
-		orderActions: len(items), attempts: &attempts}
+		orderActions: len(items), attempts: &attempts, sent: &sent}
 	fail := func(err error) (BatchPlaceResult, error) {
 		cids := make([]string, len(items))
 		for i, it := range items {
 			cids[i] = it.ClientOrderID
 		}
-		maybe := afterAmbiguous(attempts) || classifyAttempt(err) == attemptAmbiguous
+		// The failing attempt is already in attempts when it was an attempt; reading err again
+		// adds what was not (a decode failure, a wait cancelled between attempts). sent is false
+		// only when the last attempt failed before the HTTP client (config, credentials).
+		maybe := afterAmbiguous(attempts) || classifyAttempt(err, sent) == attemptAmbiguous
 		return BatchPlaceResult{}, &BatchPlaceError{ClientOrderIDs: cids, MaybePlaced: maybe, Err: err}
 	}
 	raw, err := s.t.request(ctx, c, opts)

@@ -99,6 +99,9 @@ type call struct {
 	// attempts, when set, gets one entry per failed attempt of request: whether the server may
 	// have acted on it. The batch calls read it to tell a lost answer from a definite refusal.
 	attempts *[]attemptKind
+	// sent, when set, tells whether the latest attempt reached the HTTP client (anything that
+	// fails before it, such as a config or credential error, sent nothing).
+	sent *bool
 }
 
 // attemptKind is how one failed attempt of a mutation ended.
@@ -112,8 +115,16 @@ const (
 	attemptRefused attemptKind = "refused"
 )
 
-// classifyAttempt tells an ambiguous failure from a definite refusal.
-func classifyAttempt(err error) attemptKind {
+// classifyAttempt tells an ambiguous failure from a definite refusal. sent is false when the
+// attempt failed before reaching the HTTP client. An error it does not recognise is ambiguous:
+// a wrong "maybe placed" costs a lookup, a wrong "not placed" invites a duplicate order.
+func classifyAttempt(err error, sent bool) attemptKind {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return attemptAmbiguous // a cancelled or expired call may have been sent
+	}
+	if !sent {
+		return attemptRefused
+	}
 	var ce *ConnectionError
 	if errors.As(err, &ce) {
 		if ce.notSent {
@@ -130,11 +141,8 @@ func classifyAttempt(err error) attemptKind {
 		}
 		return attemptRefused
 	}
-	// A cancelled or expired call may have been sent; an unusable 2xx was acted on.
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrBadResponse) {
-		return attemptAmbiguous
-	}
-	return attemptRefused
+	// An unusable 2xx was acted on; anything else unrecognised may have been.
+	return attemptAmbiguous
 }
 
 // afterAmbiguous reports whether an earlier attempt of the call may have been acted on.
@@ -220,13 +228,19 @@ func (t *transport) request(ctx context.Context, c call, opts []CallOption) (*ra
 			c.idempotencyKey = newID()
 		}
 	}
+	sent := new(bool)
+	if c.sent != nil {
+		sent = c.sent
+	}
+	c.sent = sent
 	for attempt := 0; ; attempt++ {
+		*sent = false
 		res, err := t.attempt(ctx, c, o)
 		if err == nil {
 			return res, nil
 		}
 		if c.attempts != nil {
-			*c.attempts = append(*c.attempts, classifyAttempt(err))
+			*c.attempts = append(*c.attempts, classifyAttempt(err, *sent))
 		}
 		if attempt >= o.maxRetries || !isRetryable(err) || ctx.Err() != nil {
 			return nil, err
@@ -374,6 +388,9 @@ func (t *transport) attemptOnce(ctx context.Context, c call, o callOptions) (*ra
 		}
 	}
 
+	if c.sent != nil {
+		*c.sent = true
+	}
 	resp, err := t.http.Do(req)
 	var data []byte
 	notSent := err != nil && dialFailed(err)

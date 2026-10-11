@@ -954,3 +954,55 @@ func TestCancelOrdersMismatchIsBadResponse(t *testing.T) {
 		}
 	}
 }
+
+type oddError struct{}
+
+func (oddError) Error() string { return "something the SDK does not know" }
+
+// oddTransport fails every request with an error type the SDK does not recognise.
+type oddTransport struct{ calls int }
+
+func (o *oddTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	o.calls++
+	if req.Body != nil {
+		req.Body.Close()
+	}
+	return nil, oddError{}
+}
+
+type failingAuth struct{}
+
+func (failingAuth) Kind() string                             { return "failing" }
+func (failingAuth) Authenticate(*http.Request, []byte) error { return oddError{} }
+func (failingAuth) Redact(s string) string                   { return s }
+
+// An unrecognised failure is "maybe placed"; only an error before anything is sent (here a
+// credential error) is not.
+func TestBatchUnrecognisedErrorMaybePlaced(t *testing.T) {
+	if classifyAttempt(oddError{}, true) != attemptAmbiguous || classifyAttempt(oddError{}, false) != attemptRefused {
+		t.Fatal("classifyAttempt: an unrecognised error after sending must be ambiguous")
+	}
+	rt := &oddTransport{}
+	fs := &fakeSleep{now: time.Unix(1_800_000_000, 0)}
+	c, err := New(Options{APIKey: testKey, APISecret: testSecret, BaseURL: "https://api.test", HTTPClient: &http.Client{Transport: rt},
+		sleep: fs.sleep, now: fs.clock, random: func() float64 { return 0.5 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Trading.PlaceOrders(context.Background(), "BTC/USDT", expandPlace(2))
+	var be *BatchPlaceError
+	if !errors.As(err, &be) || !be.MaybePlaced || rt.calls != 4 || !reflect.DeepEqual(be.ClientOrderIDs, []string{"c0", "c1"}) {
+		t.Fatalf("err %v (%+v), calls %d", err, be, rt.calls)
+	}
+
+	rt2 := &oddTransport{}
+	c2, err := New(Options{Authenticator: failingAuth{}, BaseURL: "https://api.test", HTTPClient: &http.Client{Transport: rt2},
+		sleep: fs.sleep, now: fs.clock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c2.Trading.PlaceOrders(context.Background(), "BTC/USDT", expandPlace(1))
+	if !errors.As(err, &be) || be.MaybePlaced || rt2.calls != 0 || !errors.As(err, new(oddError)) {
+		t.Fatalf("credential error: %v (%+v), calls %d", err, be, rt2.calls)
+	}
+}
