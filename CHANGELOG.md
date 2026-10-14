@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- Spec sync with the server's futures release (2026-10-14): the 9 futures operation ids now
+  start with `futures_`. New names: `OpFutures*` constants (`OpFuturesFills`, ...) and
+  `Futures*Params` types (`FuturesCandlesParams`, ...). Method names, wire requests and
+  responses are unchanged. The old names stay as deprecated aliases, so existing code compiles.
+  `RetryInfo.Operation` reports the new ids for futures calls (equal to the old constants,
+  which alias the new ones).
+
 ## [0.1.0-dev.14] (2026-10-11)
 
 ### Added

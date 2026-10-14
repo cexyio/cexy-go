@@ -44,42 +44,42 @@ func TestFuturesOperations(t *testing.T) {
 		run    func() (any, error)
 		check  func(v any) bool
 	}{
-		{OpMarkets, "/api/v1/futures/markets", "", false,
+		{OpFuturesMarkets, "/api/v1/futures/markets", "", false,
 			func() (any, error) { return c.Futures.Markets(ctx) },
 			func(v any) bool {
 				m := v.(FuturesMarkets)
 				return len(m.Markets) == 1 && m.Markets[0].MaxLeverage == 40
 			}},
-		{OpMarket, "/api/v1/futures/markets/BTC", "", false,
+		{OpFuturesMarket, "/api/v1/futures/markets/BTC", "", false,
 			func() (any, error) { return c.Futures.Market(ctx, "BTC") },
 			func(v any) bool { return v.(FuturesMarket).Market.Coin == "BTC" }},
-		{OpOrderbook, "/api/v1/futures/markets/BTC/orderbook", "depth=5", false,
+		{OpFuturesOrderbook, "/api/v1/futures/markets/BTC/orderbook", "depth=5", false,
 			func() (any, error) { return c.Futures.OrderBook(ctx, "BTC", 5) },
 			func(v any) bool { b := v.(FuturesBook); return b.Stale && len(b.Bids) == 1 && b.Bids[0].Size == "2" }},
-		{OpCandles, "/api/v1/futures/markets/BTC/candles", "before=1790000000000&interval=1h", false,
+		{OpFuturesCandles, "/api/v1/futures/markets/BTC/candles", "before=1790000000000&interval=1h", false,
 			func() (any, error) {
-				return c.Futures.Candles(ctx, "BTC", CandlesParams{Interval: "1h", Before: Ptr(int64(1790000000000))})
+				return c.Futures.Candles(ctx, "BTC", FuturesCandlesParams{Interval: "1h", Before: Ptr(int64(1790000000000))})
 			},
 			func(v any) bool { return len(v.(FuturesCandles).Candles) == 1 }},
-		{OpTrades, "/api/v1/futures/markets/k%2FPEPE/trades", "limit=10", false,
+		{OpFuturesTrades, "/api/v1/futures/markets/k%2FPEPE/trades", "limit=10", false,
 			func() (any, error) { return c.Futures.Trades(ctx, "k/PEPE", 10) },
 			func(v any) bool { tr := v.(FuturesTrades); return len(tr.Trades) == 1 && tr.Trades[0].Time == 5 }},
-		{OpPositions, "/api/v1/futures/positions", "", true,
+		{OpFuturesPositions, "/api/v1/futures/positions", "", true,
 			func() (any, error) { return c.Futures.Positions(ctx) },
 			func(v any) bool {
 				p := v.(FuturesPositions)
 				return p.HasAccount && p.Positions != nil && len(p.Positions.Positions) == 1
 			}},
-		{OpOpenOrders, "/api/v1/futures/orders", "", true,
+		{OpFuturesOpenOrders, "/api/v1/futures/orders", "", true,
 			func() (any, error) { return c.Futures.OpenOrders(ctx) },
 			func(v any) bool { return len(v.(FuturesOpenOrders).Orders) == 1 }},
-		{OpFills, "/api/v1/futures/fills", "cursor=a%2Bb", true,
+		{OpFuturesFills, "/api/v1/futures/fills", "cursor=a%2Bb", true,
 			func() (any, error) { return c.Futures.Fills(ctx, "a+b") },
 			func(v any) bool {
 				f := v.(FuturesFills)
 				return len(f.Fills) == 1 && f.NextCursor != nil && *f.NextCursor == "c 1"
 			}},
-		{OpFunding, "/api/v1/futures/funding", "", true,
+		{OpFuturesFunding, "/api/v1/futures/funding", "", true,
 			func() (any, error) { return c.Futures.Funding(ctx, "") },
 			func(v any) bool { f := v.(FuturesFunding); return len(f.Funding) == 1 && f.NextCursor == nil }},
 	}
@@ -129,7 +129,7 @@ func TestFuturesLocalChecks(t *testing.T) {
 	})
 	ctx := context.Background()
 	var ce *ConfigError
-	if _, err := c.Futures.Candles(ctx, "BTC", CandlesParams{}); !errors.As(err, &ce) {
+	if _, err := c.Futures.Candles(ctx, "BTC", FuturesCandlesParams{}); !errors.As(err, &ce) {
 		t.Fatalf("missing interval: %v", err)
 	}
 	if _, err := c.Futures.Positions(ctx); !errors.As(err, &ce) {
@@ -439,7 +439,7 @@ func TestFuturesBusyRetriesAreTheirOwnSetting(t *testing.T) {
 				t.Fatalf("requests %d sleeps %d retries %d", rec.count(), len(fs.all()), len(retries))
 			}
 			for _, r := range retries {
-				if r.Operation != OpFills || r.Delay <= 0 {
+				if r.Operation != OpFuturesFills || r.Delay <= 0 {
 					t.Fatalf("retry info %+v", r)
 				}
 			}
@@ -508,4 +508,16 @@ func TestFuturesRepeatedCursorWithRowsStops(t *testing.T) {
 	if n != 2 || rec.count() != 2 || len(fs.all()) != 0 {
 		t.Fatalf("rows %d requests %d sleeps %d", n, rec.count(), len(fs.all()))
 	}
+}
+
+// The pre-futures_ names still compile and mean the same thing.
+func TestFuturesDeprecatedAliases(t *testing.T) {
+	if OpFills != OpFuturesFills || OpOpenOrders != OpFuturesOpenOrders || OpMarkets != OpFuturesMarkets {
+		t.Fatal("deprecated operation id aliases differ")
+	}
+	var _ FuturesCandlesParams = CandlesParams{Interval: "1h"}
+	var _ FuturesTradesParams = TradesParams{}
+	var _ FuturesOrderbookParams = OrderbookParams{}
+	var _ FuturesFillsParams = FillsParams{}
+	var _ FuturesFundingParams = FundingParams{}
 }
