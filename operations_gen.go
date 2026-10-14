@@ -20,7 +20,6 @@ const (
 	OpCancelBatch             OperationID = "cancel_batch"
 	OpCancelOrder             OperationID = "cancel_order"
 	OpCancelOrderByClientID   OperationID = "cancel_order_by_client_id"
-	OpCandles                 OperationID = "candles"
 	OpDepositAddress          OperationID = "deposit_address"
 	OpExchangeConfig          OperationID = "exchange_config"
 	OpExitPool                OperationID = "exit_pool"
@@ -29,8 +28,15 @@ const (
 	OpExportOrders            OperationID = "export_orders"
 	OpExportTrades            OperationID = "export_trades"
 	OpExportWithdrawals       OperationID = "export_withdrawals"
-	OpFills                   OperationID = "fills"
-	OpFunding                 OperationID = "funding"
+	OpFuturesCandles          OperationID = "futures_candles"
+	OpFuturesFills            OperationID = "futures_fills"
+	OpFuturesFunding          OperationID = "futures_funding"
+	OpFuturesMarket           OperationID = "futures_market"
+	OpFuturesMarkets          OperationID = "futures_markets"
+	OpFuturesOpenOrders       OperationID = "futures_open_orders"
+	OpFuturesOrderbook        OperationID = "futures_orderbook"
+	OpFuturesPositions        OperationID = "futures_positions"
+	OpFuturesTrades           OperationID = "futures_trades"
 	OpGetAccountID            OperationID = "get_account_id"
 	OpGetAsset                OperationID = "get_asset"
 	OpGetBalance              OperationID = "get_balance"
@@ -58,18 +64,12 @@ const (
 	OpListSubAccounts         OperationID = "list_sub_accounts"
 	OpListWithdrawalAddresses OperationID = "list_withdrawal_addresses"
 	OpListWithdrawals         OperationID = "list_withdrawals"
-	OpMarket                  OperationID = "market"
-	OpMarkets                 OperationID = "markets"
-	OpOpenOrders              OperationID = "open_orders"
 	OpOrderHistory            OperationID = "order_history"
-	OpOrderbook               OperationID = "orderbook"
 	OpPlaceBatch              OperationID = "place_batch"
 	OpPlaceOrder              OperationID = "place_order"
-	OpPositions               OperationID = "positions"
 	OpServerTime              OperationID = "server_time"
 	OpSubAccountBalances      OperationID = "sub_account_balances"
 	OpTradeHistory            OperationID = "trade_history"
-	OpTrades                  OperationID = "trades"
 )
 
 // operations is the SDK surface: exactly the operations in openapi.sdk.json.
@@ -79,7 +79,6 @@ var operations = map[OperationID]OperationInfo{
 	OpCancelBatch:             {Method: "POST", Path: "/api/v1/trading/orders/cancel-batch", Auth: "api_key", Scope: "trade"},
 	OpCancelOrder:             {Method: "DELETE", Path: "/api/v1/trading/orders/{order_id}", Auth: "api_key", Scope: "trade"},
 	OpCancelOrderByClientID:   {Method: "DELETE", Path: "/api/v1/trading/orders/by-client-id/{client_order_id}", Auth: "api_key", Scope: "trade"},
-	OpCandles:                 {Method: "GET", Path: "/api/v1/futures/markets/{coin}/candles", Auth: "none", Scope: ""},
 	OpDepositAddress:          {Method: "GET", Path: "/api/v1/wallet/deposit-address", Auth: "api_key", Scope: "read"},
 	OpExchangeConfig:          {Method: "GET", Path: "/api/v1/config", Auth: "none", Scope: ""},
 	OpExitPool:                {Method: "POST", Path: "/api/v1/pools/{symbol}/exit", Auth: "api_key", Scope: "trade"},
@@ -88,8 +87,15 @@ var operations = map[OperationID]OperationInfo{
 	OpExportOrders:            {Method: "GET", Path: "/api/v1/exports/orders", Auth: "api_key", Scope: "read"},
 	OpExportTrades:            {Method: "GET", Path: "/api/v1/exports/trades", Auth: "api_key", Scope: "read"},
 	OpExportWithdrawals:       {Method: "GET", Path: "/api/v1/exports/withdrawals", Auth: "api_key", Scope: "read"},
-	OpFills:                   {Method: "GET", Path: "/api/v1/futures/fills", Auth: "api_key", Scope: "read"},
-	OpFunding:                 {Method: "GET", Path: "/api/v1/futures/funding", Auth: "api_key", Scope: "read"},
+	OpFuturesCandles:          {Method: "GET", Path: "/api/v1/futures/markets/{coin}/candles", Auth: "none", Scope: ""},
+	OpFuturesFills:            {Method: "GET", Path: "/api/v1/futures/fills", Auth: "api_key", Scope: "read"},
+	OpFuturesFunding:          {Method: "GET", Path: "/api/v1/futures/funding", Auth: "api_key", Scope: "read"},
+	OpFuturesMarket:           {Method: "GET", Path: "/api/v1/futures/markets/{coin}", Auth: "none", Scope: ""},
+	OpFuturesMarkets:          {Method: "GET", Path: "/api/v1/futures/markets", Auth: "none", Scope: ""},
+	OpFuturesOpenOrders:       {Method: "GET", Path: "/api/v1/futures/orders", Auth: "api_key", Scope: "read"},
+	OpFuturesOrderbook:        {Method: "GET", Path: "/api/v1/futures/markets/{coin}/orderbook", Auth: "none", Scope: ""},
+	OpFuturesPositions:        {Method: "GET", Path: "/api/v1/futures/positions", Auth: "api_key", Scope: "read"},
+	OpFuturesTrades:           {Method: "GET", Path: "/api/v1/futures/markets/{coin}/trades", Auth: "none", Scope: ""},
 	OpGetAccountID:            {Method: "GET", Path: "/api/v1/account/id", Auth: "api_key", Scope: "read"},
 	OpGetAsset:                {Method: "GET", Path: "/api/v1/assets/{symbol}", Auth: "none", Scope: ""},
 	OpGetBalance:              {Method: "GET", Path: "/api/v1/account/balances/{asset}", Auth: "api_key", Scope: "read"},
@@ -117,18 +123,12 @@ var operations = map[OperationID]OperationInfo{
 	OpListSubAccounts:         {Method: "GET", Path: "/api/v1/account/sub-accounts", Auth: "api_key", Scope: "read"},
 	OpListWithdrawalAddresses: {Method: "GET", Path: "/api/v1/wallet/withdrawal-addresses", Auth: "api_key", Scope: "read"},
 	OpListWithdrawals:         {Method: "GET", Path: "/api/v1/wallet/withdrawals", Auth: "api_key", Scope: "read"},
-	OpMarket:                  {Method: "GET", Path: "/api/v1/futures/markets/{coin}", Auth: "none", Scope: ""},
-	OpMarkets:                 {Method: "GET", Path: "/api/v1/futures/markets", Auth: "none", Scope: ""},
-	OpOpenOrders:              {Method: "GET", Path: "/api/v1/futures/orders", Auth: "api_key", Scope: "read"},
 	OpOrderHistory:            {Method: "GET", Path: "/api/v1/trading/orders/history", Auth: "api_key", Scope: "read"},
-	OpOrderbook:               {Method: "GET", Path: "/api/v1/futures/markets/{coin}/orderbook", Auth: "none", Scope: ""},
 	OpPlaceBatch:              {Method: "POST", Path: "/api/v1/trading/orders/batch", Auth: "api_key", Scope: "trade"},
 	OpPlaceOrder:              {Method: "POST", Path: "/api/v1/trading/orders", Auth: "api_key", Scope: "trade"},
-	OpPositions:               {Method: "GET", Path: "/api/v1/futures/positions", Auth: "api_key", Scope: "read"},
 	OpServerTime:              {Method: "GET", Path: "/api/v1/time", Auth: "none", Scope: ""},
 	OpSubAccountBalances:      {Method: "GET", Path: "/api/v1/account/sub-accounts/{id}/balances", Auth: "api_key", Scope: "read"},
 	OpTradeHistory:            {Method: "GET", Path: "/api/v1/trading/trades", Auth: "api_key", Scope: "read"},
-	OpTrades:                  {Method: "GET", Path: "/api/v1/futures/markets/{coin}/trades", Auth: "none", Scope: ""},
 }
 
 // ErrorCode is the machine-readable error.code of an API error. Branch on it, never on
@@ -242,31 +242,6 @@ var knownErrorCodes = map[ErrorCode]bool{
 	CodeEngineOverloaded:       true,
 }
 
-// CandlesParams holds the query parameters of candles.
-// Nil pointers are not sent.
-type CandlesParams struct {
-	// `1m`, `5m`, `15m`, `1h`, `4h` or `1d`.
-	//
-	// Required.
-	Interval string
-	// Unix milliseconds: the window of 500 candles holding this time. Absent: the latest 500.
-	Before *int64
-}
-
-func (p *CandlesParams) values() url.Values {
-	v := url.Values{}
-	if p == nil {
-		return v
-	}
-	if p.Interval != "" {
-		v.Set("interval", p.Interval)
-	}
-	if p.Before != nil {
-		v.Set("before", strconv.FormatInt(*p.Before, 10))
-	}
-	return v
-}
-
 // DepositAddressParams holds the query parameters of deposit_address.
 // Nil pointers are not sent.
 type DepositAddressParams struct {
@@ -317,14 +292,39 @@ func (p *ExportParams) values() url.Values {
 	return v
 }
 
-// FillsParams holds the query parameters of fills.
+// FuturesCandlesParams holds the query parameters of futures_candles.
 // Nil pointers are not sent.
-type FillsParams struct {
+type FuturesCandlesParams struct {
+	// `1m`, `5m`, `15m`, `1h`, `4h` or `1d`.
+	//
+	// Required.
+	Interval string
+	// Unix milliseconds: the window of 500 candles holding this time. Absent: the latest 500.
+	Before *int64
+}
+
+func (p *FuturesCandlesParams) values() url.Values {
+	v := url.Values{}
+	if p == nil {
+		return v
+	}
+	if p.Interval != "" {
+		v.Set("interval", p.Interval)
+	}
+	if p.Before != nil {
+		v.Set("before", strconv.FormatInt(*p.Before, 10))
+	}
+	return v
+}
+
+// FuturesFillsParams holds the query parameters of futures_fills.
+// Nil pointers are not sent.
+type FuturesFillsParams struct {
 	// The `next_cursor` of the previous page, as given; absent for the newest. A unix time in milliseconds is also accepted: rows older than it.
 	Cursor *string
 }
 
-func (p *FillsParams) values() url.Values {
+func (p *FuturesFillsParams) values() url.Values {
 	v := url.Values{}
 	if p == nil {
 		return v
@@ -335,20 +335,56 @@ func (p *FillsParams) values() url.Values {
 	return v
 }
 
-// FundingParams holds the query parameters of funding.
+// FuturesFundingParams holds the query parameters of futures_funding.
 // Nil pointers are not sent.
-type FundingParams struct {
+type FuturesFundingParams struct {
 	// The `next_cursor` of the previous page, as given; absent for the newest. A unix time in milliseconds is also accepted: rows older than it.
 	Cursor *string
 }
 
-func (p *FundingParams) values() url.Values {
+func (p *FuturesFundingParams) values() url.Values {
 	v := url.Values{}
 	if p == nil {
 		return v
 	}
 	if p.Cursor != nil {
 		v.Set("cursor", *p.Cursor)
+	}
+	return v
+}
+
+// FuturesOrderbookParams holds the query parameters of futures_orderbook.
+// Nil pointers are not sent.
+type FuturesOrderbookParams struct {
+	// Levels per side, 1 to 20 (default 20).
+	Depth *int
+}
+
+func (p *FuturesOrderbookParams) values() url.Values {
+	v := url.Values{}
+	if p == nil {
+		return v
+	}
+	if p.Depth != nil {
+		v.Set("depth", strconv.Itoa(*p.Depth))
+	}
+	return v
+}
+
+// FuturesTradesParams holds the query parameters of futures_trades.
+// Nil pointers are not sent.
+type FuturesTradesParams struct {
+	// 1 to 100 (default 50).
+	Limit *int
+}
+
+func (p *FuturesTradesParams) values() url.Values {
+	v := url.Values{}
+	if p == nil {
+		return v
+	}
+	if p.Limit != nil {
+		v.Set("limit", strconv.Itoa(*p.Limit))
 	}
 	return v
 }
@@ -627,24 +663,6 @@ func (p *OrderHistoryParams) values() url.Values {
 	return v
 }
 
-// OrderbookParams holds the query parameters of orderbook.
-// Nil pointers are not sent.
-type OrderbookParams struct {
-	// Levels per side, 1 to 20 (default 20).
-	Depth *int
-}
-
-func (p *OrderbookParams) values() url.Values {
-	v := url.Values{}
-	if p == nil {
-		return v
-	}
-	if p.Depth != nil {
-		v.Set("depth", strconv.Itoa(*p.Depth))
-	}
-	return v
-}
-
 // TradeHistoryParams holds the query parameters of trade_history.
 // Nil pointers are not sent.
 type TradeHistoryParams struct {
@@ -674,24 +692,6 @@ func (p *TradeHistoryParams) values() url.Values {
 	}
 	if p.Direction != nil {
 		v.Set("direction", string(*p.Direction))
-	}
-	return v
-}
-
-// TradesParams holds the query parameters of trades.
-// Nil pointers are not sent.
-type TradesParams struct {
-	// 1 to 100 (default 50).
-	Limit *int
-}
-
-func (p *TradesParams) values() url.Values {
-	v := url.Values{}
-	if p == nil {
-		return v
-	}
-	if p.Limit != nil {
-		v.Set("limit", strconv.Itoa(*p.Limit))
 	}
 	return v
 }

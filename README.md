@@ -329,7 +329,7 @@ or changes anything. Markets are named by coin (`"BTC"`), not by spot symbol.
 mk, err := c.Futures.Markets(ctx)                  // every listed market and its figures
 m, err := c.Futures.Market(ctx, "BTC")
 book, err := c.Futures.OrderBook(ctx, "BTC", 10)   // levels a side, 1 to 20 (0: the default, 20)
-cs, err := c.Futures.Candles(ctx, "BTC", cexy.CandlesParams{Interval: "1h"}) // 500 candles; Before: an older window
+cs, err := c.Futures.Candles(ctx, "BTC", cexy.FuturesCandlesParams{Interval: "1h"}) // 500 candles; Before: an older window
 tr, err := c.Futures.Trades(ctx, "BTC", 50)        // recent public trades, at most 100 (0: the default, 50)
 ```
 

@@ -17,67 +17,67 @@ type FuturesService struct{ t *transport }
 
 // Markets returns every listed futures market and its current figures.
 func (s *FuturesService) Markets(ctx context.Context, opts ...CallOption) (FuturesMarkets, error) {
-	return getData[FuturesMarkets](ctx, s.t, call{op: OpMarkets}, opts)
+	return getData[FuturesMarkets](ctx, s.t, call{op: OpFuturesMarkets}, opts)
 }
 
 // Market returns one futures market, for example "BTC" (the coin name, not a spot symbol).
 func (s *FuturesService) Market(ctx context.Context, coin string, opts ...CallOption) (FuturesMarket, error) {
-	return getData[FuturesMarket](ctx, s.t, call{op: OpMarket, pathParams: map[string]string{"coin": coin}}, opts)
+	return getData[FuturesMarket](ctx, s.t, call{op: OpFuturesMarket, pathParams: map[string]string{"coin": coin}}, opts)
 }
 
 // OrderBook returns a futures market's book, depth levels a side (1 to 20; 0 sends no depth
 // and the server's default, 20, applies).
 func (s *FuturesService) OrderBook(ctx context.Context, coin string, depth int, opts ...CallOption) (FuturesBook, error) {
-	p := OrderbookParams{}
+	p := FuturesOrderbookParams{}
 	if depth != 0 {
 		p.Depth = &depth
 	}
-	return getData[FuturesBook](ctx, s.t, call{op: OpOrderbook, pathParams: map[string]string{"coin": coin},
+	return getData[FuturesBook](ctx, s.t, call{op: OpFuturesOrderbook, pathParams: map[string]string{"coin": coin},
 		query: p.values()}, opts)
 }
 
 // Candles returns 500 candles of a futures market, oldest first: the latest, or the window
 // holding params.Before (unix milliseconds). params.Interval is required (1m, 5m, 15m, 1h,
 // 4h or 1d).
-func (s *FuturesService) Candles(ctx context.Context, coin string, params CandlesParams, opts ...CallOption) (FuturesCandles, error) {
+func (s *FuturesService) Candles(ctx context.Context, coin string, params FuturesCandlesParams, opts ...CallOption) (FuturesCandles, error) {
 	if params.Interval == "" {
 		return FuturesCandles{}, &ConfigError{Msg: "Futures.Candles: Interval is required"}
 	}
-	return getData[FuturesCandles](ctx, s.t, call{op: OpCandles, pathParams: map[string]string{"coin": coin},
+	return getData[FuturesCandles](ctx, s.t, call{op: OpFuturesCandles, pathParams: map[string]string{"coin": coin},
 		query: params.values()}, opts)
 }
 
 // Trades returns a futures market's recent public trades, newest first: limit of them (1 to
 // 100; 0 sends no limit and the server's default, 50, applies).
 func (s *FuturesService) Trades(ctx context.Context, coin string, limit int, opts ...CallOption) (FuturesTrades, error) {
-	p := TradesParams{}
+	p := FuturesTradesParams{}
 	if limit != 0 {
 		p.Limit = &limit
 	}
-	return getData[FuturesTrades](ctx, s.t, call{op: OpTrades, pathParams: map[string]string{"coin": coin},
+	return getData[FuturesTrades](ctx, s.t, call{op: OpFuturesTrades, pathParams: map[string]string{"coin": coin},
 		query: p.values()}, opts)
 }
 
 // Positions returns the account's margin summary and open positions.
 func (s *FuturesService) Positions(ctx context.Context, opts ...CallOption) (FuturesPositions, error) {
-	return getData[FuturesPositions](ctx, s.t, call{op: OpPositions}, opts)
+	return getData[FuturesPositions](ctx, s.t, call{op: OpFuturesPositions}, opts)
 }
 
 // OpenOrders returns the account's open futures orders.
 func (s *FuturesService) OpenOrders(ctx context.Context, opts ...CallOption) (FuturesOpenOrders, error) {
-	return getData[FuturesOpenOrders](ctx, s.t, call{op: OpOpenOrders}, opts)
+	return getData[FuturesOpenOrders](ctx, s.t, call{op: OpFuturesOpenOrders}, opts)
 }
 
 // Fills returns one page of the account's fills, newest first, 30 days back. Pass "" for the
 // newest page, then each NextCursor exactly as given until it is nil. A page may be short,
 // even empty, and still have a NextCursor. AllFills does the paging.
 func (s *FuturesService) Fills(ctx context.Context, cursor string, opts ...CallOption) (FuturesFills, error) {
-	return getData[FuturesFills](ctx, s.t, call{op: OpFills, query: (&FillsParams{Cursor: optCursor(cursor)}).values()}, opts)
+	return getData[FuturesFills](ctx, s.t, call{op: OpFuturesFills, query: (&FuturesFillsParams{Cursor: optCursor(cursor)}).values()}, opts)
 }
 
 // Funding returns one page of the account's funding payments, paged like Fills.
 func (s *FuturesService) Funding(ctx context.Context, cursor string, opts ...CallOption) (FuturesFunding, error) {
-	return getData[FuturesFunding](ctx, s.t, call{op: OpFunding, query: (&FundingParams{Cursor: optCursor(cursor)}).values()}, opts)
+	return getData[FuturesFunding](ctx, s.t, call{op: OpFuturesFunding, query: (&FuturesFundingParams{Cursor: optCursor(cursor)}).values()}, opts)
 }
 
 // AllFills iterates over the account's fills, newest first, fetching pages as needed. It ends
@@ -92,7 +92,7 @@ func (s *FuturesService) Funding(ctx context.Context, cursor string, opts ...Cal
 // CodePagingCursorRepeated. Both carry Details["cursor"], which resumes the listing through Fills.
 func (s *FuturesService) AllFills(ctx context.Context, opts ...IterOption) iter.Seq2[FuturesFill, error] {
 	o := iterOpts(opts)
-	return pageHistory(ctx, s.t, OpFills, o, func(ctx context.Context, cursor string) ([]FuturesFill, bool, *string, error) {
+	return pageHistory(ctx, s.t, OpFuturesFills, o, func(ctx context.Context, cursor string) ([]FuturesFill, bool, *string, error) {
 		p, err := s.Fills(ctx, cursor, o.call...)
 		return p.Fills, p.HasAccount, p.NextCursor, err
 	})
@@ -101,7 +101,7 @@ func (s *FuturesService) AllFills(ctx context.Context, opts ...IterOption) iter.
 // AllFunding iterates over the account's funding payments, newest first, like AllFills.
 func (s *FuturesService) AllFunding(ctx context.Context, opts ...IterOption) iter.Seq2[Funding, error] {
 	o := iterOpts(opts)
-	return pageHistory(ctx, s.t, OpFunding, o, func(ctx context.Context, cursor string) ([]Funding, bool, *string, error) {
+	return pageHistory(ctx, s.t, OpFuturesFunding, o, func(ctx context.Context, cursor string) ([]Funding, bool, *string, error) {
 		p, err := s.Funding(ctx, cursor, o.call...)
 		return p.Funding, p.HasAccount, p.NextCursor, err
 	})
