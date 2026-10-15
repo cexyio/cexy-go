@@ -573,3 +573,44 @@ func TestWSRefusedSubscribeIsNotHeld(t *testing.T) {
 		t.Fatalf("refused channel held: %v", got)
 	}
 }
+
+// Error frames expose channel, details and retry_after_seconds (conformance/ws-client-rules.md).
+func TestWSServerErrorChannelAndDetails(t *testing.T) {
+	var mu sync.Mutex
+	var got []*WSError
+	ws, m := setupWS(t, WSOptions{Handlers: WSHandlers{OnServerError: func(e *WSError) {
+		mu.Lock()
+		got = append(got, e)
+		mu.Unlock()
+	}}})
+	if _, err := ws.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	frames := []string{
+		`{"type":"error","code":"RATE_LIMITED","message":"m","channel":"futures.orderbook:NOPE","details":{"retry_after_seconds":60}}`,
+		`{"type":"error","code":"X","message":"m"}`,
+		`{"type":"error","code":"X","message":"m","details":null}`,
+		`{"type":"error","code":"X","message":"m","details":["a"],"channel":7}`,
+		`{"type":"error","code":"X","message":"m","details":{"retry_after_seconds":"60"}}`,
+		`{"type":"error","code":"X","message":"m","details":{"retry_after_seconds":-5}}`,
+		`{"type":"error","code":"X","message":"m","unknown_key":{"a":1}}`,
+	}
+	for _, f := range frames {
+		m.push(json.RawMessage(f))
+	}
+	eventually(t, "error frames", func() bool { mu.Lock(); defer mu.Unlock(); return len(got) == len(frames) })
+	mu.Lock()
+	defer mu.Unlock()
+	if e := got[0]; e.Code != "RATE_LIMITED" || !e.FromServer || e.Channel != "futures.orderbook:NOPE" ||
+		e.RetryAfter != 60*time.Second || e.Details["retry_after_seconds"] != float64(60) {
+		t.Errorf("full frame: %+v", e)
+	}
+	for i, e := range got[1:] {
+		if e.Channel != "" || e.RetryAfter != 0 || len(e.Details) > 1 || (e.Details != nil && e.Details["retry_after_seconds"] == nil) {
+			t.Errorf("frame %d: %+v", i+1, e)
+		}
+	}
+	if got[4].Details["retry_after_seconds"] != "60" || got[3].Details != nil {
+		t.Errorf("details kept wrongly: %+v %+v", got[4], got[3])
+	}
+}

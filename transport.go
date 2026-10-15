@@ -36,6 +36,9 @@ type callOptions struct {
 	timeout        time.Duration
 	maxRetries     int
 	idempotencyKey string
+	// noRetry, when set, names errors the request must return at once instead of retrying (the
+	// futures history helpers handle a busy 503 themselves). Not part of the public options.
+	noRetry func(error) bool
 }
 
 // WithTimeout overrides the client's per-attempt timeout for this call.
@@ -242,7 +245,7 @@ func (t *transport) request(ctx context.Context, c call, opts []CallOption) (*ra
 		if c.attempts != nil {
 			*c.attempts = append(*c.attempts, classifyAttempt(err, *sent))
 		}
-		if attempt >= o.maxRetries || !isRetryable(err) || ctx.Err() != nil {
+		if attempt >= o.maxRetries || !isRetryable(err) || ctx.Err() != nil || (o.noRetry != nil && o.noRetry(err)) {
 			return nil, err
 		}
 		if err := t.backoff(ctx, c.op, attempt, err, c.idempotencyKey); err != nil {
@@ -264,6 +267,23 @@ func (t *transport) backoff(ctx context.Context, op OperationID, attempt int, ca
 			Err: cause, IdempotencyKey: idemKey})
 	}
 	return t.sleep(ctx, d)
+}
+
+// backoffHinted is backoff with a wait the caller chose: hint, taken exactly (no jitter), or the
+// normal backoff when hint is not positive. A hint above MaxServerWait is not taken: it returns
+// cause, as backoff does.
+func (t *transport) backoffHinted(ctx context.Context, op OperationID, attempt int, cause error, hint time.Duration) error {
+	if hint <= 0 {
+		return t.backoff(ctx, op, attempt, cause, "")
+	}
+	if hint > MaxServerWait {
+		return cause
+	}
+	if t.onRetry != nil {
+		info := operations[op]
+		t.onRetry(RetryInfo{Operation: op, Method: info.Method, Path: info.Path, Attempt: attempt + 1, Delay: hint, Err: cause})
+	}
+	return t.sleep(ctx, hint)
 }
 
 // serverWaitTooLong: the server asked to wait longer than MaxServerWait.

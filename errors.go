@@ -89,6 +89,12 @@ type APIError struct {
 	RetryAfter time.Duration
 
 	kind error
+	// headerRetryAfter is the usable Retry-After header alone (0 when absent or unusable): the
+	// futures history helpers prefer it to details.retry_after_seconds.
+	headerRetryAfter time.Duration
+	// cause is the error that made the SDK produce this one (the last busy 503 behind a
+	// CodePagingStalled); Unwrap returns it.
+	cause error
 }
 
 func (e *APIError) Error() string {
@@ -101,6 +107,10 @@ func (e *APIError) Error() string {
 	}
 	return fmt.Sprintf("cexy: [%d %s] %s%s", e.Status, e.Code, e.Message, rid)
 }
+
+// Unwrap returns the error behind an SDK-made error: for CodePagingStalled after busy 503
+// answers, the last 503 (its Details["reason"] stays reachable). Nil otherwise.
+func (e *APIError) Unwrap() error { return e.cause }
 
 // Is reports whether the error belongs to category target (ErrNotFound, ErrRateLimited, ...).
 func (e *APIError) Is(target error) bool {
@@ -234,6 +244,7 @@ func errorFromResponse(status int, body []byte, h http.Header, redact func(strin
 		e.Fields = map[string]string{}
 	}
 	e.RetryAfter = retryAfter(h, e.Details)
+	e.headerRetryAfter = headerRetryAfter(h)
 
 	switch {
 	case status == 429 || e.Code == CodeRateLimited:
@@ -317,20 +328,29 @@ func decodeDetails(raw map[string]json.RawMessage) map[string]any {
 // ignored, and a huge value saturates instead of overflowing (callers never wait longer than
 // MaxServerWait).
 func retryAfter(h http.Header, details map[string]any) time.Duration {
-	var best time.Duration
-	if v := strings.TrimSpace(h.Get("Retry-After")); v != "" {
-		if secs, err := strconv.ParseFloat(v, 64); err == nil {
-			best = secondsDuration(secs)
-		} else if at, err := http.ParseTime(v); err == nil {
-			if d := time.Until(at); d > 0 {
-				best = d
-			}
-		}
-	}
+	best := headerRetryAfter(h)
 	if d := detailSeconds(details["retry_after_seconds"]); d > best {
 		best = d
 	}
 	return best
+}
+
+// headerRetryAfter reads the Retry-After header alone (seconds or an HTTP date); 0 when it is
+// missing, unparseable or not positive.
+func headerRetryAfter(h http.Header) time.Duration {
+	v := strings.TrimSpace(h.Get("Retry-After"))
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.ParseFloat(v, 64); err == nil {
+		return secondsDuration(secs)
+	}
+	if at, err := http.ParseTime(v); err == nil {
+		if d := time.Until(at); d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 func detailSeconds(v any) time.Duration {

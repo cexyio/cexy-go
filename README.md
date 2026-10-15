@@ -358,11 +358,12 @@ for f, err := range c.Futures.AllFills(ctx) { // newest first, 30 days back
 Fills and funding are paged by an opaque cursor: pass `NextCursor` back exactly as given (`""` for
 the newest page) until it is nil. A page may be short, even empty, and still have a next cursor.
 `AllFills` and `AllFunding` do this for you. While the futures provider is busy the server answers
-an empty page that hands back the cursor it was given: the iterator waits (the client's backoff,
-reported to `Options.OnRetry`) and asks again, at most `cexy.WithMaxBusyRetries(n)` times in a row
+an empty page that hands back the cursor it was given, or a 503 with `details.reason`
+`futures_data_unavailable`: the iterator waits (the server's `Retry-After`, else
+`details.retry_after_seconds`, else the client's backoff; reported to `Options.OnRetry`) and asks again, at most `cexy.WithMaxBusyRetries(n)` times in a row
 (3 by default; independent of the client's retry count, so a client with `NoRetries` still rides
 out a busy provider), then yields a retryable `*cexy.APIError` with code `cexy.CodePagingStalled`
-(`PAGING_STALLED`, made by the SDK, `Status` 0). The rows already yielded are not the whole
+(`PAGING_STALLED`, made by the SDK, `Status` 0; after a 503, `errors.Unwrap` gives it). The rows already yielded are not the whole
 history: resume later from `Details["cursor"]`. A page with rows that hands back the cursor it was
 sent is a server error: its rows are yielded, then a non-retryable `cexy.CodePagingCursorRepeated`
 (`PAGING_CURSOR_REPEATED`) error ends the iteration. Without a futures account the iterators end
