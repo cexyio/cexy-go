@@ -23,7 +23,8 @@ All notable changes to this project are documented here. The format follows
   same-cursor page, and the request retries no longer apply to it, so a client with `NoRetries`
   rides it out. The wait is `Retry-After`, else `details.retry_after_seconds`, taken exactly, else
   the backoff. A long provider outage now ends the iteration with `PAGING_STALLED` (retryable, and
-  `errors.Unwrap` gives the last 503) instead of `SERVICE_UNAVAILABLE`. Other 503s, 5xx and 429 keep
+  `errors.Unwrap` gives the last 503, so `errors.Is(err, ErrServer)` is also true for it) instead of
+  `SERVICE_UNAVAILABLE`. Other 503s, 5xx and 429 keep
   the normal retries.
 
 ## [0.1.0-dev.14] (2026-10-11)
