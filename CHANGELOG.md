@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-dev.15] (2026-10-15)
+
 ### Added
 - `WSError` has `Channel`, `Details` and `RetryAfter`, read from a server `error` frame when
   present (`details.retry_after_seconds`, a non-negative number; anything else leaves them empty).
@@ -26,6 +28,7 @@ All notable changes to this project are documented here. The format follows
   `errors.Unwrap` gives the last 503, so `errors.Is(err, ErrServer)` is also true for it) instead of
   `SERVICE_UNAVAILABLE`. Other 503s, 5xx and 429 keep
   the normal retries.
+- Built against cexy-api-spec `0bd25ad` (futures busy 503 paging, WS error `channel`/`details`).
 
 ## [0.1.0-dev.14] (2026-10-11)
 
