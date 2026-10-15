@@ -2,8 +2,10 @@ package cexy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
+	"net/http"
 )
 
 // FuturesService: futures data, read only. Markets, OrderBook, Candles and Trades are public;
@@ -84,16 +86,21 @@ func (s *FuturesService) Funding(ctx context.Context, cursor string, opts ...Cal
 // at the last page, or at once (no rows) when the account has no futures account.
 //
 // While the futures provider is busy the server answers an empty page that hands back the
-// cursor it was given: the iterator waits (the client's backoff, reported to Options.OnRetry
-// with the PAGING_STALLED error as Err) and asks again, at most WithMaxBusyRetries times in a
-// row (default 3, independent of the client's retry count), then yields a retryable *APIError
-// with code CodePagingStalled. A page with rows that hands back the cursor it was given is a
+// cursor it was given, or a 503 whose details.reason is "futures_data_unavailable" (also on the
+// first request). The iterator waits and asks again for the same cursor, at most
+// WithMaxBusyRetries times in a row (default 3, one count for both kinds, reset by a page that
+// advances; independent of the client's retry count, which does not apply to that 503). The
+// wait is the Retry-After header, else details.retry_after_seconds, taken exactly (a hint above
+// MaxServerWait fails at once with the 503), else the client's backoff; it is reported to
+// Options.OnRetry. Then it yields a retryable *APIError with code CodePagingStalled, whose
+// Unwrap is the last 503 when the last busy answer was one. Any other retryable error (a 503
+// without that reason, 502, 429) is retried by the client's normal retry policy. A page with rows that hands back the cursor it was given is a
 // server error: its rows are yielded, then a non-retryable *APIError with code
 // CodePagingCursorRepeated. Both carry Details["cursor"], which resumes the listing through Fills.
 func (s *FuturesService) AllFills(ctx context.Context, opts ...IterOption) iter.Seq2[FuturesFill, error] {
 	o := iterOpts(opts)
 	return pageHistory(ctx, s.t, OpFuturesFills, o, func(ctx context.Context, cursor string) ([]FuturesFill, bool, *string, error) {
-		p, err := s.Fills(ctx, cursor, o.call...)
+		p, err := s.Fills(ctx, cursor, o.pageCall()...)
 		return p.Fills, p.HasAccount, p.NextCursor, err
 	})
 }
@@ -102,7 +109,7 @@ func (s *FuturesService) AllFills(ctx context.Context, opts ...IterOption) iter.
 func (s *FuturesService) AllFunding(ctx context.Context, opts ...IterOption) iter.Seq2[Funding, error] {
 	o := iterOpts(opts)
 	return pageHistory(ctx, s.t, OpFuturesFunding, o, func(ctx context.Context, cursor string) ([]Funding, bool, *string, error) {
-		p, err := s.Funding(ctx, cursor, o.call...)
+		p, err := s.Funding(ctx, cursor, o.pageCall()...)
 		return p.Funding, p.HasAccount, p.NextCursor, err
 	})
 }
@@ -121,7 +128,9 @@ const DefaultMaxBusyRetries = 3
 // pageHistory walks a futures history listing (conformance/futures/history_paging.json): the
 // first request sends no cursor, each next_cursor is sent back verbatim until it is null; an
 // empty page whose next_cursor is the cursor just sent means the provider is busy: back off and
-// ask again, at most maxBusyRetries times in a row, then fail with PAGING_STALLED; a page with
+// ask again, at most maxBusyRetries times in a row, then fail with PAGING_STALLED. A 503 with
+// details.reason futures_data_unavailable counts the same (the request retries skip it, see
+// busyUnavailable); a page with
 // rows whose next_cursor is the cursor just sent yields its rows, then fails with
 // PAGING_CURSOR_REPEATED (never loop).
 func pageHistory[T any](ctx context.Context, t *transport, op OperationID, o iterOptions,
@@ -137,15 +146,34 @@ func pageHistory[T any](ctx context.Context, t *transport, op OperationID, o ite
 		for {
 			rows, hasAccount, next, err := fetch(ctx, cursor)
 			if err != nil {
-				yield(zero, err)
-				return
+				if !busyUnavailable(err) {
+					yield(zero, err)
+					return
+				}
+				stalled := pagingError(CodePagingStalled, op, cursor, stalls+1, err)
+				if stalls >= maxBusy {
+					yield(zero, stalled)
+					return
+				}
+				var ae *APIError
+				errors.As(err, &ae)
+				hint := ae.headerRetryAfter
+				if hint <= 0 {
+					hint = detailSeconds(ae.Details["retry_after_seconds"])
+				}
+				if berr := t.backoffHinted(ctx, op, stalls, err, hint); berr != nil {
+					yield(zero, berr)
+					return
+				}
+				stalls++
+				continue
 			}
 			if !hasAccount {
 				return
 			}
 			repeated := cursor != "" && next != nil && *next == cursor
 			if repeated && len(rows) == 0 {
-				stalled := pagingError(CodePagingStalled, op, cursor, stalls+1)
+				stalled := pagingError(CodePagingStalled, op, cursor, stalls+1, nil)
 				if stalls >= maxBusy {
 					yield(zero, stalled)
 					return
@@ -168,7 +196,7 @@ func pageHistory[T any](ctx context.Context, t *transport, op OperationID, o ite
 				n++
 			}
 			if repeated {
-				yield(zero, pagingError(CodePagingCursorRepeated, op, cursor, 1))
+				yield(zero, pagingError(CodePagingCursorRepeated, op, cursor, 1, nil))
 				return
 			}
 			if next == nil || *next == "" || (o.maxItems > 0 && n >= o.maxItems) {
@@ -179,9 +207,17 @@ func pageHistory[T any](ctx context.Context, t *transport, op OperationID, o ite
 	}
 }
 
+// busyUnavailable: a 503 whose details.reason is futures_data_unavailable, the provider's busy
+// answer, which pageHistory handles itself.
+func busyUnavailable(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && ae.Status == http.StatusServiceUnavailable && ae.Details["reason"] == "futures_data_unavailable"
+}
+
 // CodePagingStalled is the code of the *APIError that AllFills and AllFunding yield when the
-// futures provider stays busy: an empty page handed back the cursor just sent more times in a
-// row than WithMaxBusyRetries allows. It is made by the SDK, not sent by the API (Status 0). It
+// futures provider stays busy: an empty page handed back the cursor just sent, or a 503 with
+// details.reason futures_data_unavailable, more times in a row than WithMaxBusyRetries allows
+// (Unwrap is the last 503 in the second case). It is made by the SDK, not sent by the API (Status 0). It
 // is retryable: the rows yielded so far are not the whole history; resume later from
 // Details["cursor"] (a string) with Fills or Funding.
 const CodePagingStalled ErrorCode = "PAGING_STALLED"
@@ -191,11 +227,11 @@ const CodePagingStalled ErrorCode = "PAGING_STALLED"
 // rows forever. Made by the SDK (Status 0), not retryable. Details["cursor"] is that cursor.
 const CodePagingCursorRepeated ErrorCode = "PAGING_CURSOR_REPEATED"
 
-func pagingError(code ErrorCode, op OperationID, cursor string, attempts int) *APIError {
-	e := &APIError{Code: code, Details: map[string]any{"cursor": cursor}}
+func pagingError(code ErrorCode, op OperationID, cursor string, attempts int, cause error) *APIError {
+	e := &APIError{Code: code, Details: map[string]any{"cursor": cursor}, cause: cause}
 	if code == CodePagingStalled {
 		e.Retryable = true
-		e.Message = fmt.Sprintf("%s: the futures provider is busy (an empty page returned the same cursor %d time(s) in a row); "+
+		e.Message = fmt.Sprintf("%s: the futures provider is busy (%d busy answer(s) in a row for the same cursor); "+
 			"retry later from Details[\"cursor\"]", operations[op].Path, attempts)
 	} else {
 		e.Message = fmt.Sprintf("%s: a page with rows returned the cursor it was sent; stopped so as not to repeat rows",

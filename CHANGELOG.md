@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `WSError` has `Channel`, `Details` and `RetryAfter`, read from a server `error` frame when
+  present (`details.retry_after_seconds`, a non-negative number; anything else leaves them empty).
+  The client does not retry on them by itself.
+
 ### Changed
 - Spec sync with the server's futures release (2026-10-14): the 9 futures operation ids now
   start with `futures_`. New names: `OpFutures*` constants (`OpFuturesFills`, ...) and
@@ -13,6 +18,14 @@ All notable changes to this project are documented here. The format follows
   responses are unchanged. The old names stay as deprecated aliases, so existing code compiles.
   `RetryInfo.Operation` reports the new ids for futures calls (equal to the old constants,
   which alias the new ones).
+- `AllFills` and `AllFunding` treat a 503 with `details.reason` `futures_data_unavailable` as a busy
+  answer, also on the first request: it shares the `WithMaxBusyRetries` budget with the empty
+  same-cursor page, and the request retries no longer apply to it, so a client with `NoRetries`
+  rides it out. The wait is `Retry-After`, else `details.retry_after_seconds`, taken exactly, else
+  the backoff. A long provider outage now ends the iteration with `PAGING_STALLED` (retryable, and
+  `errors.Unwrap` gives the last 503, so `errors.Is(err, ErrServer)` is also true for it) instead of
+  `SERVICE_UNAVAILABLE`. Other 503s, 5xx and 429 keep
+  the normal retries.
 
 ## [0.1.0-dev.14] (2026-10-11)
 

@@ -51,6 +51,14 @@ type WSError struct {
 	Message string
 	// True when it came from a server error frame (not a local guard or a disconnect).
 	FromServer bool
+	// Channel is the channel a server error frame names (a refused subscribe); empty when the
+	// frame has none and for local errors.
+	Channel string
+	// Details is the frame's "details" object; empty when absent or not an object.
+	Details map[string]any
+	// RetryAfter is details.retry_after_seconds when it is a non-negative number; 0 otherwise.
+	// The client does not retry on it by itself.
+	RetryAfter time.Duration
 }
 
 func (e *WSError) Error() string { return "cexy websocket: [" + e.Code + "] " + e.Message }
@@ -1090,6 +1098,13 @@ func (w *WebSocket) onFrame(frame map[string]any) {
 			msg = code
 		}
 		werr := &WSError{Code: code, Message: msg, FromServer: true}
+		werr.Channel, _ = frame["channel"].(string)
+		if d, ok := frame["details"].(map[string]any); ok {
+			werr.Details = d
+			if secs, ok := d["retry_after_seconds"].(float64); ok {
+				werr.RetryAfter = secondsDuration(secs)
+			}
+		}
 		if ch, ok := frame["challenge"].(string); ok {
 			w.mu.Lock()
 			w.challenge = ch

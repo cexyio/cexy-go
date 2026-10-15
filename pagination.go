@@ -64,14 +64,21 @@ type iterOptions struct {
 func WithMaxItems(n int) IterOption { return func(o *iterOptions) { o.maxItems = n } }
 
 // WithMaxBusyRetries sets how many times in a row Futures.AllFills and Futures.AllFunding ask
-// again for a page while the futures provider is busy, before they yield PAGING_STALLED. Default
-// DefaultMaxBusyRetries (3). It is independent of the client's retry count: a client with
-// NoRetries still rides out a busy provider. 0 gives up at the first busy page.
+// again for a page while the futures provider is busy (an empty page with the same cursor, or a
+// 503 futures_data_unavailable), before they yield PAGING_STALLED. Default DefaultMaxBusyRetries
+// (3). It is independent of the client's retry count: a client with NoRetries still rides out a
+// busy provider. 0 gives up at the first busy answer.
 func WithMaxBusyRetries(n int) IterOption { return func(o *iterOptions) { o.maxBusyRetries = &n } }
 
 // WithCallOptions applies call options (timeout, retries) to every page request.
 func WithCallOptions(opts ...CallOption) IterOption {
 	return func(o *iterOptions) { o.call = append(o.call, opts...) }
+}
+
+// pageCall is the call options of one page request: the caller's, then the one that leaves a
+// busy 503 to the iterator's own busy budget instead of the request retries.
+func (o iterOptions) pageCall() []CallOption {
+	return append(append([]CallOption(nil), o.call...), func(c *callOptions) { c.noRetry = busyUnavailable })
 }
 
 func iterOpts(opts []IterOption) iterOptions {

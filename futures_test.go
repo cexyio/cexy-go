@@ -158,24 +158,30 @@ func TestFuturesLocalChecks(t *testing.T) {
 }
 
 type pagingCase struct {
-	ID    string `json:"id"`
-	Pages []struct {
+	ID     string `json:"id"`
+	Client struct {
+		MaxRetries *int `json:"max_retries"` // nil: the SDK default
+	} `json:"client"`
+	MaxBusy *int `json:"max_busy_retries"` // nil: the file's default
+	Pages   []struct {
 		RequestCursor *string           `json:"request_cursor"`
 		HTTPStatus    int               `json:"http_status"` // an error answer: Response is its body
 		Headers       map[string]string `json:"headers"`
 		Response      json.RawMessage   `json:"response"`
 	} `json:"pages"`
 	Expect struct {
-		IDs            []string `json:"ids"`
-		IDsBeforeError []string `json:"ids_before_error"`
-		Requests       int      `json:"requests"`
-		Sleeps         int      `json:"sleeps"`
-		EncodedQuery2  string   `json:"encoded_query_of_request_2"`
-		ErrorCode      string   `json:"error_code"`
-		ErrorRetryable bool     `json:"error_retryable"`
-		HasAccount     *bool    `json:"has_account"`
-		Times          []int64  `json:"times"` // funding_cases: the rows' time
-		MinSleep       float64  `json:"min_sleep_seconds"`
+		IDs            []string  `json:"ids"`
+		IDsBeforeError []string  `json:"ids_before_error"`
+		Requests       int       `json:"requests"`
+		Sleeps         int       `json:"sleeps"`
+		EncodedQuery2  string    `json:"encoded_query_of_request_2"`
+		ErrorCode      string    `json:"error_code"`
+		ErrorRetryable bool      `json:"error_retryable"`
+		HasAccount     *bool     `json:"has_account"`
+		Times          []int64   `json:"times"`          // funding_cases: the rows' time
+		SleepSeconds   []float64 `json:"sleep_seconds"`  // the hinted waits, exactly, in order
+		BackoffSleeps  *int      `json:"backoff_sleeps"` // waits that came from the backoff
+		CauseReason    string    `json:"error_cause_reason"`
 	} `json:"expect"`
 }
 
@@ -275,20 +281,22 @@ func TestFuturesHistoryPagingConformance(t *testing.T) {
 			case "funding_cases":
 				path = "/api/v1/futures/funding"
 			}
-			// Retries disabled, to show the busy-page retries are a setting of their own, except
-			// where an error answer must be retried with the normal request-retry policy.
-			opts := Options{APIKey: testKey, APISecret: testSecret, NoRetries: true}
-			for _, p := range tc.Pages {
-				if p.HTTPStatus != 0 {
-					opts.NoRetries = false
-				}
+			// client.max_retries: 0 disables request retries (to show the busy retries are a setting
+			// of their own), N sets them; absent keeps the SDK default.
+			opts := Options{APIKey: testKey, APISecret: testSecret}
+			if n := tc.Client.MaxRetries; n != nil {
+				opts.NoRetries, opts.MaxRetries = *n == 0, *n
+			}
+			var pageOpts []IterOption
+			if tc.MaxBusy != nil {
+				pageOpts = append(pageOpts, WithMaxBusyRetries(*tc.MaxBusy))
 			}
 			c, rec, fs := newTestClient(t, opts, pagingServer(t, tc, rename))
 			ctx := context.Background()
 			ids := []string{}
 			var gotErr error
 			if kind == "fills" {
-				for f, err := range c.Futures.AllFills(ctx) {
+				for f, err := range c.Futures.AllFills(ctx, pageOpts...) {
 					if err != nil {
 						gotErr = err
 						break
@@ -296,7 +304,7 @@ func TestFuturesHistoryPagingConformance(t *testing.T) {
 					ids = append(ids, f.ID)
 				}
 			} else {
-				for f, err := range c.Futures.AllFunding(ctx) {
+				for f, err := range c.Futures.AllFunding(ctx, pageOpts...) {
 					if err != nil {
 						gotErr = err
 						break
@@ -330,9 +338,23 @@ func TestFuturesHistoryPagingConformance(t *testing.T) {
 			if got := len(fs.all()); got != tc.Expect.Sleeps {
 				t.Errorf("sleeps %d, want %d", got, tc.Expect.Sleeps)
 			}
-			for _, d := range fs.all() {
-				if d < time.Duration(tc.Expect.MinSleep*float64(time.Second)) {
-					t.Errorf("slept %s, want at least %gs", d, tc.Expect.MinSleep)
+			if tc.Expect.SleepSeconds != nil || tc.Expect.BackoffSleeps != nil {
+				// Hinted waits are exact (no jitter) and come in the listed order; the others come
+				// from the backoff. The fake backoff (random 0.5) is 0.25, 0.5, 1 s, so no fixture
+				// hint may be one of those.
+				hinted, backoff := []float64{}, 0
+				for _, d := range fs.all() {
+					if len(hinted) < len(tc.Expect.SleepSeconds) && d == time.Duration(tc.Expect.SleepSeconds[len(hinted)]*float64(time.Second)) {
+						hinted = append(hinted, d.Seconds())
+					} else {
+						backoff++
+					}
+				}
+				if tc.Expect.SleepSeconds != nil && !reflect.DeepEqual(hinted, tc.Expect.SleepSeconds) {
+					t.Errorf("hinted waits %v, want %v (all %v)", hinted, tc.Expect.SleepSeconds, fs.all())
+				}
+				if tc.Expect.BackoffSleeps != nil && backoff != *tc.Expect.BackoffSleeps {
+					t.Errorf("backoff waits %d, want %d", backoff, *tc.Expect.BackoffSleeps)
 				}
 			}
 			for i := 0; i < rec.count(); i++ {
@@ -356,18 +378,29 @@ func TestFuturesHistoryPagingConformance(t *testing.T) {
 				if !errors.As(gotErr, &ae) {
 					t.Fatalf("error %v (%T), want *APIError", gotErr, gotErr)
 				}
-				if string(ae.Code) != tc.Expect.ErrorCode || (ae.Code != CodePagingStalled && ae.Code != CodePagingCursorRepeated) {
+				if string(ae.Code) != tc.Expect.ErrorCode {
 					t.Errorf("code %s, want %s", ae.Code, tc.Expect.ErrorCode)
 				}
 				if ae.Retryable != tc.Expect.ErrorRetryable || isRetryable(gotErr) != tc.Expect.ErrorRetryable {
 					t.Errorf("retryable %v/%v, want %v", ae.Retryable, isRetryable(gotErr), tc.Expect.ErrorRetryable)
 				}
-				last := tc.Pages[len(tc.Pages)-1].RequestCursor
-				if ae.Status != 0 || last == nil || ae.Details["cursor"] != *last {
-					t.Errorf("status %d details %v", ae.Status, ae.Details)
+				if ae.Code == CodePagingStalled || ae.Code == CodePagingCursorRepeated {
+					last := ""
+					if c := tc.Pages[len(tc.Pages)-1].RequestCursor; c != nil {
+						last = *c
+					}
+					if ae.Status != 0 || ae.Details["cursor"] != last {
+						t.Errorf("status %d details %v", ae.Status, ae.Details)
+					}
+					if !strings.Contains(gotErr.Error(), tc.Expect.ErrorCode) {
+						t.Errorf("message %q", gotErr.Error())
+					}
 				}
-				if !strings.Contains(gotErr.Error(), tc.Expect.ErrorCode) {
-					t.Errorf("message %q", gotErr.Error())
+				if tc.Expect.CauseReason != "" {
+					var cause *APIError
+					if !errors.As(errors.Unwrap(gotErr), &cause) || cause.Status != 503 || cause.Details["reason"] != tc.Expect.CauseReason {
+						t.Errorf("cause %v, want a 503 with reason %s", errors.Unwrap(gotErr), tc.Expect.CauseReason)
+					}
 				}
 			}
 			if tc.Expect.HasAccount != nil && kind != "funding" {
@@ -391,7 +424,11 @@ func TestFuturesHistoryPagingConformance(t *testing.T) {
 	for _, id := range []string{"short_pages_until_null", "cursor_sent_back_verbatim", "busy_provider_same_cursor_retried",
 		"busy_provider_gives_up_after_max_retries", "nonempty_page_repeating_cursor_fails", "no_futures_account",
 		"real_cursor_formats", "unavailable_mid_paging_retried", "funding_short_pages_until_null", "funding_busy_then_rows",
-		"funding_no_account"} {
+		"funding_no_account", "unavailable_busy_retries_off", "unavailable_on_first_page", "unavailable_busy_gives_up",
+		"busy_and_unavailable_share_budget", "zero_busy_retries_fails_at_once", "hint_header_before_details",
+		"hint_from_details_without_header", "bad_hint_uses_backoff", "other_503_uses_request_retries",
+		"funding_unavailable_busy_retries_off", "funding_unavailable_on_first_page", "zero_hint_uses_backoff",
+		"header_hint_wins_over_large_details_hint", "exhausted_budget_wins_over_large_hint"} {
 		if !seen[id] {
 			t.Errorf("case %s missing from the conformance file", id)
 		}
@@ -475,8 +512,7 @@ func TestFuturesPagingStopsOnCancelAndMaxItems(t *testing.T) {
 func TestFuturesPagingServerError(t *testing.T) {
 	c, rec, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret, NoRetries: true}, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "2")
-		writeJSON(w, 503, map[string]any{"error": map[string]any{"code": "SERVICE_UNAVAILABLE", "message": "busy", "retryable": true,
-			"details": map[string]any{"reason": "futures_data_unavailable"}}})
+		writeJSON(w, 503, map[string]any{"error": map[string]any{"code": "SERVICE_UNAVAILABLE", "message": "down", "retryable": true}})
 	})
 	var got error
 	for _, err := range c.Futures.AllFunding(context.Background()) {
