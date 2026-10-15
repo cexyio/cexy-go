@@ -340,7 +340,8 @@ func TestFuturesHistoryPagingConformance(t *testing.T) {
 			}
 			if tc.Expect.SleepSeconds != nil || tc.Expect.BackoffSleeps != nil {
 				// Hinted waits are exact (no jitter) and come in the listed order; the others come
-				// from the backoff.
+				// from the backoff. The fake backoff (random 0.5) is 0.25, 0.5, 1 s, so no fixture
+				// hint may be one of those.
 				hinted, backoff := []float64{}, 0
 				for _, d := range fs.all() {
 					if len(hinted) < len(tc.Expect.SleepSeconds) && d == time.Duration(tc.Expect.SleepSeconds[len(hinted)]*float64(time.Second)) {
@@ -426,7 +427,8 @@ func TestFuturesHistoryPagingConformance(t *testing.T) {
 		"funding_no_account", "unavailable_busy_retries_off", "unavailable_on_first_page", "unavailable_busy_gives_up",
 		"busy_and_unavailable_share_budget", "zero_busy_retries_fails_at_once", "hint_header_before_details",
 		"hint_from_details_without_header", "bad_hint_uses_backoff", "other_503_uses_request_retries",
-		"funding_unavailable_busy_retries_off", "funding_unavailable_on_first_page"} {
+		"funding_unavailable_busy_retries_off", "funding_unavailable_on_first_page", "zero_hint_uses_backoff",
+		"header_hint_wins_over_large_details_hint", "exhausted_budget_wins_over_large_hint"} {
 		if !seen[id] {
 			t.Errorf("case %s missing from the conformance file", id)
 		}
