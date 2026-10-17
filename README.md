@@ -89,7 +89,7 @@ reads it. A house account placing an order without an armed switch gets `ErrDead
 
 One cancel-all call handles at most 500 orders. Each order it handled is in exactly one of
 `Cancelled`, `AlreadyClosed` (it closed on its own first; not an error) and `Failed`, with the
-reason in `Failures` (`INVALID_STATE` means the order was still being placed). `HasMore` means
+reason in `Failures` (`INVALID_STATE` means an order taken off the book that cannot be cancelled yet; a pending order is cancelled at once by the server). `HasMore` means
 there are more. To repeat until nothing is left, use `CancelAllUntilDone`:
 
 ```go
@@ -97,13 +97,13 @@ sum, err := c.Trading.CancelAllUntilDone(ctx, cexy.CancelAllOptions{Symbol: "BTC
 // sum.Cancelled, sum.AlreadyClosed, sum.Failed + sum.Failures, sum.Rounds, sum.Stopped
 ```
 
-It calls again while `HasMore` is set or an order failed with `INVALID_STATE` or
-`SERVICE_UNAVAILABLE`. Each round is exactly one HTTP request (the loop owns the retries), so it
+It calls again while `HasMore` is set or a failure code is `SERVICE_UNAVAILABLE`,
+`MARKET_UNAVAILABLE` or `CONCURRENT_MODIFICATION`. `INVALID_STATE` is returned, not retried. Each round is exactly one HTTP request (the loop owns the retries), so it
 never sends more than `MaxRounds` requests (default 20). After a round with no progress it waits
 1, 2, 4, 8, then 15 s. A round that fails with a retryable error counts as a round: after a 429 it
 waits the server's `Retry-After` exactly, after other retryable errors the next back-off step. It
 never takes a wait that would reach `TimeBudget` (default 120 s): it stops with `Stopped:
-"time_budget"` and `LastErrorCode` set. A non-retryable error is returned with the summary so far.
+"time_budget"` and `LastErrorCode` set. A market that stays down returns only when the time budget ends. A non-retryable error is returned with the summary so far.
 Rounds are merged by order id: the latest state wins.
 
 Give both `APIKey` and `APISecret`, or neither: `New` returns a `*ConfigError` for only one.

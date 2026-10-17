@@ -149,7 +149,7 @@ func TestCancelAllUntilDoneConformance(t *testing.T) {
 func TestCancelAllIsOneCallByDefault(t *testing.T) {
 	handler, calls := sequence(t, []json.RawMessage{
 		json.RawMessage(`{"cancelled":["o1"],"already_closed":["o2"],"failed":["o3"],"has_more":true,` +
-			`"failures":[{"order_id":"o3","code":"INVALID_STATE","message":"still being placed"}]}`),
+			`"failures":[{"order_id":"o3","code":"INVALID_STATE","message":"cannot be cancelled yet"}]}`),
 	}, false)
 	c, rec, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret}, handler)
 	res, err := c.Trading.CancelAll(context.Background(), "BTC/USDT")
@@ -209,7 +209,7 @@ func TestCancelAllUntilDoneNeverExceedsMaxRounds(t *testing.T) {
 // time budget (the loop and the transport share the clock).
 func TestCancelAllUntilDone429WaitCountsAgainstTheBudget(t *testing.T) {
 	stuck := map[string]any{"cancelled": []string{}, "already_closed": []string{}, "failed": []string{"p1"}, "has_more": false,
-		"failures": []map[string]string{{"order_id": "p1", "code": "INVALID_STATE", "message": "still being placed"}}}
+		"failures": []map[string]string{{"order_id": "p1", "code": "MARKET_UNAVAILABLE", "message": "market restarting"}}}
 	var n atomic.Int32
 	c, _, fs := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret, DisableRateLimit: true},
 		func(w http.ResponseWriter, r *http.Request) {
@@ -245,7 +245,7 @@ func TestCancelAllUntilDoneFinalStateWins(t *testing.T) {
 			`{"order_id":"a","code":"INVALID_STATE","message":"x"},{"order_id":"b","code":"INVALID_STATE","message":"x"},` +
 			`{"order_id":"c","code":"SERVICE_UNAVAILABLE","message":"x"}]}`),
 		json.RawMessage(`{"cancelled":["a"],"already_closed":["b"],"failed":["c"],"has_more":false,"failures":[` +
-			`{"order_id":"c","code":"MARKET_UNAVAILABLE","message":"halted"}]}`),
+			`{"order_id":"c","code":"INVALID_STATE","message":"halted"}]}`),
 	}, false)
 	c, _, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret, DisableRateLimit: true}, handler)
 	got, err := c.Trading.CancelAllUntilDone(context.Background(), CancelAllOptions{Symbol: "BTC/USDT"})
@@ -255,14 +255,14 @@ func TestCancelAllUntilDoneFinalStateWins(t *testing.T) {
 	if !sameSet(got.Cancelled, []string{"a"}) || !sameSet(got.AlreadyClosed, []string{"b"}) || !sameSet(got.Failed, []string{"c"}) {
 		t.Fatalf("got %+v", got)
 	}
-	if len(got.Failures) != 1 || got.Failures[0].OrderID != "c" || got.Failures[0].Code != "MARKET_UNAVAILABLE" {
+	if len(got.Failures) != 1 || got.Failures[0].OrderID != "c" || got.Failures[0].Code != "INVALID_STATE" {
 		t.Fatalf("failures %+v", got.Failures)
 	}
 }
 
 func TestCancelAllUntilDoneStopsWhenContextEnds(t *testing.T) {
 	handler, _ := sequence(t, []json.RawMessage{json.RawMessage(`{"cancelled":[],"already_closed":[],"failed":["p"],"has_more":false,` +
-		`"failures":[{"order_id":"p","code":"INVALID_STATE","message":"x"}]}`)}, true)
+		`"failures":[{"order_id":"p","code":"MARKET_UNAVAILABLE","message":"x"}]}`)}, true)
 	c, _, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret, DisableRateLimit: true}, handler)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -338,4 +338,33 @@ func TestCancelAllUntilDoneCountsALimiterBlockAgainstTheBudget(t *testing.T) {
 	if !slices.Equal(got.Cancelled, []string{"o1"}) {
 		t.Fatalf("cancelled %v", got.Cancelled)
 	}
+}
+
+// Retry codes of the loop: MARKET_UNAVAILABLE and CONCURRENT_MODIFICATION retry then resolve;
+// INVALID_STATE is returned at once, without a retry.
+func TestCancelAllUntilDoneRetryCodes(t *testing.T) {
+	fail := func(code string) json.RawMessage {
+		return json.RawMessage(`{"cancelled":[],"already_closed":[],"failed":["p"],"has_more":false,` +
+			`"failures":[{"order_id":"p","code":"` + code + `","message":"x"}]}`)
+	}
+	ok := json.RawMessage(`{"cancelled":["p"],"already_closed":[],"failed":[],"has_more":false,"failures":[]}`)
+	for _, code := range []string{"MARKET_UNAVAILABLE", "CONCURRENT_MODIFICATION", "SERVICE_UNAVAILABLE"} {
+		t.Run(code+" retries", func(t *testing.T) {
+			handler, calls := sequence(t, []json.RawMessage{fail(code), ok}, false)
+			c, _, _ := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret, DisableRateLimit: true}, handler)
+			got, err := c.Trading.CancelAllUntilDone(context.Background(), CancelAllOptions{Symbol: "BTC/USDT"})
+			if err != nil || calls.Load() != 2 || got.Stopped != CancelStoppedDone || !sameSet(got.Cancelled, []string{"p"}) || len(got.Failed) != 0 {
+				t.Fatalf("calls %d, err %v, got %+v", calls.Load(), err, got)
+			}
+		})
+	}
+	t.Run("INVALID_STATE is not retried", func(t *testing.T) {
+		handler, calls := sequence(t, []json.RawMessage{fail("INVALID_STATE"), ok}, false)
+		c, _, fs := newTestClient(t, Options{APIKey: testKey, APISecret: testSecret, DisableRateLimit: true}, handler)
+		got, err := c.Trading.CancelAllUntilDone(context.Background(), CancelAllOptions{Symbol: "BTC/USDT"})
+		if err != nil || calls.Load() != 1 || got.Rounds != 1 || got.Stopped != CancelStoppedDone ||
+			!sameSet(got.Failed, []string{"p"}) || got.Failures[0].Code != "INVALID_STATE" || len(fs.all()) != 0 {
+			t.Fatalf("calls %d, err %v, got %+v", calls.Load(), err, got)
+		}
+	})
 }

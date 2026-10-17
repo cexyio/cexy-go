@@ -293,7 +293,7 @@ func serverWaitTooLong(err error) bool {
 }
 
 // retryDelay: the server's hint (at most MaxServerWait, checked by backoff) plus up to 250 ms
-// of jitter, or full-jitter exponential backoff (500 ms doubling, capped at 10 s).
+// of jitter, or full-jitter exponential backoff (0.5 s doubling, capped at 10 s).
 func (t *transport) retryDelay(attempt int, cause error) time.Duration {
 	var ae *APIError
 	if errors.As(cause, &ae) && ae.RetryAfter > 0 {
