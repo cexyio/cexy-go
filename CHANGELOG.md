@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- The cancel-all loop (`CancelAllUntilDone`) now retries exactly `SERVICE_UNAVAILABLE`,
+  `MARKET_UNAVAILABLE` and `CONCURRENT_MODIFICATION` (besides `HasMore`). `INVALID_STATE` is no
+  longer retried: it means an order taken off the book that cannot be cancelled yet, and is returned
+  in the summary. Needs backend 94a2735 or later, which cancels a pending order at once; against an
+  older backend a pending order's `INVALID_STATE` returns at once. A market that stays down returns
+  only when the time budget ends. Doc and README texts updated for cancel-at-once. Single cancel and
+  cancel-batch are unchanged.
+
 ## [0.1.0-dev.15] (2026-10-15)
 
 ### Added

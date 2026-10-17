@@ -512,7 +512,8 @@ func (s *TradingService) CancelOrderByClientID(ctx context.Context, clientOrderI
 //
 // One call handles at most 500 orders. Every order it handled is in exactly one of Cancelled,
 // AlreadyClosed (it closed on its own first: not a failure) and Failed (with the reason in
-// Failures; INVALID_STATE means it was still being placed). HasMore means there are more:
+// Failures; INVALID_STATE means an order taken off the book that cannot be cancelled yet). A pending
+// order is cancelled at once by the server. HasMore means there are more:
 // call again, or use CancelAllUntilDone.
 //
 // The server limits cancel-all to 30 calls a minute per account (ErrRateLimited, retried after
@@ -660,7 +661,9 @@ type CancelAllSummary struct {
 var cancelBackoff = []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second, 8 * time.Second, 15 * time.Second}
 
 // CancelAllUntilDone repeats cancel-all until nothing is left to do: while HasMore is set, or
-// while an order failed with INVALID_STATE (still being placed) or SERVICE_UNAVAILABLE.
+// while a failure code is SERVICE_UNAVAILABLE, MARKET_UNAVAILABLE or CONCURRENT_MODIFICATION.
+// INVALID_STATE (an order taken off the book that cannot be cancelled yet) is not retried: it is
+// returned in the summary. A pending order is cancelled at once by the server.
 //
 // Each round is exactly one HTTP request: the loop owns the retries, so it never sends more
 // than MaxRounds requests. After a round with no progress (nothing cancelled or already closed)
@@ -670,9 +673,10 @@ var cancelBackoff = []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.S
 // retryable error the next back-off step. It never takes a wait that would bring the elapsed
 // time to or past TimeBudget, or a server wait above MaxServerWait: it stops with
 // CancelStoppedTimeBudget (and LastErrorCode when the last round failed). It also stops after
-// MaxRounds requests. The server closes an order stuck being placed within about 90 s.
-// Failure codes other than INVALID_STATE and SERVICE_UNAVAILABLE are returned in the summary,
-// never retried.
+// MaxRounds requests. A market that stays
+// down (MARKET_UNAVAILABLE) makes the loop return only when the time budget ends.
+// Failure codes other than SERVICE_UNAVAILABLE, MARKET_UNAVAILABLE and CONCURRENT_MODIFICATION
+// are returned in the summary, never retried.
 //
 // A non-retryable error (or a cancelled ctx) is returned with the summary so far.
 func (s *TradingService) CancelAllUntilDone(ctx context.Context, o CancelAllOptions, opts ...CallOption) (CancelAllSummary, error) {
@@ -735,7 +739,7 @@ func (s *TradingService) CancelAllUntilDone(ctx context.Context, o CancelAllOpti
 			hasMore = res.HasMore
 			retry := false
 			for _, f := range res.Failures {
-				if f.Code == string(CodeInvalidState) || f.Code == string(CodeServiceUnavailable) {
+				if f.Code == string(CodeServiceUnavailable) || f.Code == string(CodeMarketUnavailable) || f.Code == string(CodeConcurrentModification) {
 					retry = true
 				}
 			}

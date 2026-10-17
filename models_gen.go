@@ -265,7 +265,7 @@ type CancelBatchResult struct {
 
 // CancelFailure: Why one order could not be cancelled.
 type CancelFailure struct {
-	// The error code of the attempt, as in any error response: e.g. `INVALID_STATE` for an order still being placed when the wait ran out, or `MARKET_UNAVAILABLE`.
+	// The error code of the attempt, as in any error response: e.g. `MARKET_UNAVAILABLE` for an order whose market is restarting, or `CONCURRENT_MODIFICATION`.
 	Code string `json:"code"`
 	// Its message.
 	Message string `json:"message"`
