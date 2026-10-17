@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0-dev.16] (2026-10-17)
+
 ### Changed
 - The cancel-all loop (`CancelAllUntilDone`) now retries exactly `SERVICE_UNAVAILABLE`,
   `MARKET_UNAVAILABLE` and `CONCURRENT_MODIFICATION` (besides `HasMore`). `INVALID_STATE` is no
@@ -14,6 +16,7 @@ All notable changes to this project are documented here. The format follows
   older backend a pending order's `INVALID_STATE` returns at once. A market that stays down returns
   only when the time budget ends. Doc and README texts updated for cancel-at-once. Single cancel and
   cancel-batch are unchanged.
+- Built against cexy-api-spec `09c9ae0` (cancel-intent texts, cancel-all loop retry codes).
 
 ## [0.1.0-dev.15] (2026-10-15)
 
